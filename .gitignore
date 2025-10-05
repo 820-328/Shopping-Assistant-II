@@ -1,0 +1,16 @@
+﻿# ---- Python / venv ----
+.venv/
+__pycache__/
+*.pyc
+
+# ---- Secrets ----
+.env
+
+# ---- VS Code ----
+.vscode/
+
+# ---- Streamlit ----
+.streamlit/
+
+# ---- App outputs (必要なら) ----
+shopping_result.csv
