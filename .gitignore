@@ -1,16 +1,7 @@
-﻿# ---- Python / venv ----
-.venv/
+﻿.venv/
 __pycache__/
 *.pyc
-
-# ---- Secrets ----
-.env
-
-# ---- VS Code ----
+.streamlit/secrets.toml
+.DS_Store
 .vscode/
-
-# ---- Streamlit ----
-.streamlit/
-
-# ---- App outputs (必要なら) ----
-shopping_result.csv
+.idea/
