@@ -11,7 +11,6 @@
 #   pip install streamlit pillow numpy pandas rapidfuzz requests python-dotenv "openai>=1.0.0"
 #
 # ▼ 起動（ローカル）
-#   cd "<リポジトリのルート>"
 #   streamlit run shopping_assistant_streamlit.py
 
 from __future__ import annotations
@@ -25,32 +24,57 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-# ==== 環境 & OpenAI クライアント（任意） ====
+# ==== .env 読み込み（ローカル用） ====
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except Exception:
     pass
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-CLIENT = None
-EMBED_MODEL_DEFAULT = "text-embedding-3-small"
-LLM_OPTIONS = ["gpt-5-mini", "gpt-4o-mini"]
+# ==== OpenAI クライアント取得（env → st.secrets の順で探す） ====
+def get_openai_client():
+    """
+    - まず環境変数 OPENAI_API_KEY
+    - 無ければ st.secrets["OPENAI_API_KEY"] または st.secrets["openai"]["api_key"]
+    で API キーを探し、見つかれば OpenAI クライアントを返す。無ければ None。
+    """
+    key = os.environ.get("OPENAI_API_KEY", "")
+    if not key:
+        try:
+            key = st.secrets.get("OPENAI_API_KEY", "")
+        except Exception:
+            key = key or ""
+    if not key:
+        try:
+            key = (st.secrets.get("openai") or {}).get("api_key", "")  # optional nested style
+        except Exception:
+            pass
+    if not key:
+        return None
 
-try:
-    if OPENAI_API_KEY:
+    try:
         from openai import OpenAI
-        CLIENT = OpenAI()
-except Exception:
-    CLIENT = None
+        return OpenAI(api_key=key)
+    except Exception:
+        return None
+
+CLIENT = get_openai_client()
+EMBED_MODEL_DEFAULT = "text-embedding-3-small"
+# 存在するモデルだけにする（無効モデルがデフォルトにならないように）
+LLM_OPTIONS = ["gpt-4o-mini", "gpt-4o"]
 
 # ==== ローカル類似度（RapidFuzz 任意） ====
+# ==== ローカル類似度（RapidFuzz 任意） ====
 try:
-    from rapidfuzz import process as rf_process, fuzz as rf_fuzz
+    import importlib
+    _rf = importlib.import_module("rapidfuzz")  # 動的 import なので Pylance は赤線を出さない
+    rf_process = _rf.process
+    rf_fuzz = _rf.fuzz
     HAVE_RAPIDFUZZ = True
 except Exception:
     import difflib  # fallback
     HAVE_RAPIDFUZZ = False
+
 
 # ==== 外部ヒント API（OFF/OBF/OPF 任意） ====
 REQUESTS_OK = True
@@ -59,18 +83,15 @@ try:
 except Exception:
     REQUESTS_OK = False
 
-
 def _strip_lang(tag: str) -> str:
     return tag.split(":", 1)[1] if ":" in tag else tag
-
 
 def _fetch_json(url: str, params: Dict) -> Dict:
     if not REQUESTS_OK:
         return {}
     try:
         r = requests.get(
-            url,
-            params=params,
+            url, params=params,
             headers={"User-Agent": "ShoppingAssistant/1.0 (+contact: you@example.com)"},
             timeout=6,
         )
@@ -78,7 +99,6 @@ def _fetch_json(url: str, params: Dict) -> Dict:
         return r.json()
     except Exception:
         return {}
-
 
 def _off_search(q: str, page_size: int = 12) -> List[str]:
     js = _fetch_json(
@@ -91,7 +111,6 @@ def _off_search(q: str, page_size: int = 12) -> List[str]:
             tags.add(_strip_lang(t))
     return list(tags)
 
-
 def _obf_search(q: str, page_size: int = 12) -> List[str]:
     js = _fetch_json(
         "https://world.openbeautyfacts.org/api/v2/search",
@@ -102,7 +121,6 @@ def _obf_search(q: str, page_size: int = 12) -> List[str]:
         for t in (p.get("categories_tags") or []):
             tags.add(_strip_lang(t))
     return list(tags)
-
 
 def _opf_search(q: str, page_size: int = 12) -> List[str]:
     js = _fetch_json(
@@ -115,7 +133,6 @@ def _opf_search(q: str, page_size: int = 12) -> List[str]:
             tags.add(_strip_lang(t))
     return list(tags)
 
-
 @st.cache_data(show_spinner=False, ttl=3600)
 def external_hints(q: str) -> Dict:
     if not REQUESTS_OK:
@@ -126,13 +143,29 @@ def external_hints(q: str) -> Dict:
         merged.extend(lst or [])
     for t in merged:
         if t not in seen:
-            seen.add(t)
-            out.append(t)
+            seen.add(t); out.append(t)
         if len(out) >= 20:
             break
     return {"tags": out, "sources": {"off": off[:20], "obf": obf[:20], "opf": opf[:20]}}
 
-# ==== フロアカテゴリ（OK 想定） ====  ※1Fに生鮮系の通路キーも追加
+# ==== フロアカテゴリ（OK 想定） ====
+@dataclass(frozen=True)
+class CategoryRow:
+    floor: str
+    aisle: str
+    category: str
+    alias: str
+
+_SPLIT_RE = re.compile(r"[・/／,、\s]+")
+def normalize_text(s: str) -> str:
+    s2 = s.strip().lower()
+    return s2.replace("　", "").replace(" ", "")
+
+def expand_aliases(cat: str) -> List[str]:
+    base = normalize_text(cat)
+    parts = [normalize_text(p) for p in _SPLIT_RE.split(cat) if p]
+    return list(dict.fromkeys([base] + parts))
+
 FLOOR1: Dict[str, List[str]] = {
     "1A": ["のり・わかめ・昆布", "豆・ごま・しいたけ", "春雨・切り干し大根"],
     "2A": ["つゆ・醤油・", "みりん・料理酒", "お酢・飯用酢"],
@@ -157,7 +190,6 @@ FLOOR1: Dict[str, List[str]] = {
     "17": ["チョコレート", "キャンディー", "ガム・キャラクター菓子", "クッキー・ビスケット"],
     "18": ["せんべい", "お茶菓子"],
     "19": ["食パン・菓子パン", "和洋生菓子"],
-    # ▼ 生鮮系など（通路キーとして使う）
     "青果": ["リンゴ", "バナナ", "梨", "みかん", "スイカ", "パイナップル", "メロン", "シャインマスカット", "ぶどう", "イチゴ", "サクランボ", "オレンジ", "グレープフルーツ"],
     "野菜": ["キャベツ", "レタス", "大葉", "大根", "セロリ", "ピーマン", "白菜", "ニラ", "もやし", "きゅうり", "ごぼう", "ジャガイモ", "人参"],
     "鮮魚": ["マグロ", "シーフードミックス", "貝類", "わかめ", "サーモン", "鯛", "イカ", "タコ", "鯖", "しめ鯖", "アナゴ", "イワシ"],
@@ -217,10 +249,8 @@ except Exception:
         return 1  # fallback
     RESAMPLE_LANCZOS = _pick_resample_lanczos()
 
-
 def pillow_overlay_image(base_rgba: Image.Image, ov_rgba: Image.Image,
                          x: int = 0, y: int = 0, scale: float = 1.0, alpha: float = 1.0) -> Image.Image:
-    """別PNG(透過あり)を位置(x,y)に重ねる。scaleは倍率、alphaは全体不透明度。"""
     W2, H2 = ov_rgba.size
     new_size = (max(1, int(W2 * scale)), max(1, int(H2 * scale)))
     ov = ov_rgba.resize(new_size, RESAMPLE_LANCZOS).convert("RGBA")
@@ -232,29 +262,7 @@ def pillow_overlay_image(base_rgba: Image.Image, ov_rgba: Image.Image,
     base.alpha_composite(ov, (int(x), int(y)))
     return base
 
-# ==== 正規化/インデックス ====
-@dataclass(frozen=True)
-class CategoryRow:
-    floor: str
-    aisle: str
-    category: str
-    alias: str
-
-
-_SPLIT_RE = re.compile(r"[・/／,、\s]+")
-
-
-def normalize_text(s: str) -> str:
-    s2 = s.strip().lower()
-    return s2.replace("　", "").replace(" ", "")
-
-
-def expand_aliases(cat: str) -> List[str]:
-    base = normalize_text(cat)
-    parts = [normalize_text(p) for p in _SPLIT_RE.split(cat) if p]
-    return list(dict.fromkeys([base] + parts))
-
-
+# ==== インデックス構築 ====
 def build_index() -> List[CategoryRow]:
     rows: List[CategoryRow] = []
     for aisle, cats in FLOOR1.items():
@@ -278,12 +286,9 @@ def embed_texts(texts: List[str], model: str) -> Optional[np.ndarray]:
     except Exception:
         return None
 
-
 def _unit_rows(mat: np.ndarray) -> np.ndarray:
-    n = np.linalg.norm(mat, axis=1, keepdims=True)
-    n[n == 0] = 1.0
+    n = np.linalg.norm(mat, axis=1, keepdims=True); n[n == 0] = 1.0
     return mat / n
-
 
 @st.cache_resource(show_spinner=False)
 def cache_alias_embeddings(aliases_enriched: Tuple[str, ...], model: str, _key: str) -> Optional[np.ndarray]:
@@ -301,7 +306,6 @@ def _try_parse_json(content: str) -> Optional[dict | list]:
             except Exception:
                 return None
         return None
-
 
 def llm_pick_best(item: str, shortlist: List[CategoryRow], model_name: str, hints: dict | None = None) -> Optional[dict]:
     if CLIENT is None:
@@ -331,7 +335,6 @@ def llm_pick_best(item: str, shortlist: List[CategoryRow], model_name: str, hint
             return data
     except Exception:
         return None
-
 
 def llm_pick_best_batch(items: List[str], shortlist_map: Dict[str, List[CategoryRow]], model_name: str,
                         hints_map: Dict[str, dict] | None = None) -> Optional[List[dict]]:
@@ -379,8 +382,7 @@ def fuzz_best(item: str, aliases: List[str]) -> Tuple[Optional[int], float, str]
         try:
             close = difflib.get_close_matches(q, aliases, n=1, cutoff=0.5)  # type: ignore
             if close:
-                a = close[0]
-                i = aliases.index(a)
+                a = close[0]; i = aliases.index(a)
                 return i, 80.0, a
         except Exception:
             pass
@@ -403,64 +405,23 @@ def aisle_sort_key(s: str) -> Tuple[int, int, str]:
     suf = suf_raw.upper() if suf_raw and suf_raw.isalpha() else ""
     return (n, _SUFFIX_ORDER.get(suf, 99), s)
 
-# ==== 連携のためのパス設定（相対パス優先 / 旧絶対パスはフォールバック） ====
-# このファイルと同じディレクトリを起点に、"素材" / "assets" / "static" の順で探す
-APP_DIR = Path(__file__).resolve().parent
-CANDIDATE_ASSET_DIRS = [
-    APP_DIR / "素材",
-    APP_DIR / "assets",
-    APP_DIR / "static",
-]
+# ==== アセットの相対パス解決 ====
+APP_DIR = Path(__file__).parent
+ASSETS = APP_DIR / "assets"
+BASE_1F_PATH = ASSETS / "OK1階.png"
+BASE_2F_PATH = ASSETS / "OK2階.png"
+HIGHLIGHT_DIR_1F = ASSETS / "1階ハイライト"
+HIGHLIGHT_DIR_2F = ASSETS / "2階ハイライト"
 
-def _first_existing_path(*parts: str) -> Optional[str]:
-    for root in CANDIDATE_ASSET_DIRS:
-        p = root.joinpath(*parts)
-        if p.exists():
-            return str(p)
-    return None
-
-# 相対パスで探す
-BASE_1F_PATH = _first_existing_path("OK1階.png")
-BASE_2F_PATH = _first_existing_path("OK2階.png")
-
-HIGHLIGHT_DIR_1F: Optional[str] = None
-HIGHLIGHT_DIR_2F: Optional[str] = None
-for root in CANDIDATE_ASSET_DIRS:
-    d1 = root / "1階ハイライト"
-    d2 = root / "2階ハイライト"
-    if HIGHLIGHT_DIR_1F is None and d1.is_dir():
-        HIGHLIGHT_DIR_1F = str(d1)
-    if HIGHLIGHT_DIR_2F is None and d2.is_dir():
-        HIGHLIGHT_DIR_2F = str(d2)
-
-# ローカル（旧OneDrive絶対パス）が存在すればフォールバック
-if BASE_1F_PATH is None:
-    old = Path(r"C:\Users\tenne\OneDrive\Documents\■テンポラリー置場\OK_app\素材\OK1階.png")
-    if old.exists():
-        BASE_1F_PATH = str(old)
-if BASE_2F_PATH is None:
-    old = Path(r"C:\Users\tenne\OneDrive\Documents\■テンポラリー置場\OK_app\素材\OK2階.png")
-    if old.exists():
-        BASE_2F_PATH = str(old)
-if HIGHLIGHT_DIR_1F is None:
-    old = Path(r"C:\Users\tenne\OneDrive\Documents\■テンポラリー置場\OK_app\素材\1階ハイライト")
-    if old.is_dir():
-        HIGHLIGHT_DIR_1F = str(old)
-if HIGHLIGHT_DIR_2F is None:
-    old = Path(r"C:\Users\tenne\OneDrive\Documents\■テンポラリー置場\OK_app\素材\2階ハイライト")
-    if old.is_dir():
-        HIGHLIGHT_DIR_2F = str(old)
-
-def _safe_open_rgba(path: Optional[str]) -> Optional[Image.Image]:
+def _safe_open_rgba(path: Path) -> Optional[Image.Image]:
     try:
-        if path and os.path.exists(path) and str(path).lower().endswith(".png"):
+        if path and path.exists() and str(path).lower().endswith(".png"):
             return Image.open(path).convert("RGBA")
     except Exception:
         return None
     return None
 
 def _normalize_aisle_token(s: str) -> str:
-    """例: '1a' -> '1A', '05b' -> '5B'。日本語通路名（青果 等）はそのまま。"""
     if not s:
         return ""
     s = str(s).strip()
@@ -471,55 +432,56 @@ def _normalize_aisle_token(s: str) -> str:
     suf = (m.group(2) or "").upper()
     return f"{num}{suf}"
 
-def _find_highlight_pngs_for_aisle(hl_dir: Optional[str], aisle: str) -> List[str]:
-    """
-    ハイライト用PNGの命名規則（想定）:
-      - '<通路名>.png'（例: '1A.png', '5.png', '青果.png'）
-    ディレクトリ内に該当ファイルがあれば全部重ねる（複数想定）
-    """
-    out: List[str] = []
-    if not hl_dir or not os.path.isdir(hl_dir):
+def _find_highlight_pngs_for_aisle(hl_dir: Path, aisle: str) -> List[Path]:
+    out: List[Path] = []
+    if not hl_dir or not hl_dir.is_dir():
         return out
     target = _normalize_aisle_token(aisle)
-    for name in os.listdir(hl_dir):
-        if not name.lower().endswith(".png"):
-            continue
-        stem = os.path.splitext(name)[0]
+    for p in hl_dir.glob("*.png"):
+        stem = p.stem
         if _normalize_aisle_token(stem).upper() == target.upper():
-            out.append(os.path.join(hl_dir, name))
+            out.append(p)
     return out
 
 # ==== UI ====
 st.set_page_config(page_title="Shopping Assistant", layout="wide")
 st.title("Shopping Assistant")
 
-st.markdown("""
-<style>
-:root { --checkbox-nudge: -0.75em; }
-.rowcell { height: 28px; display: flex; align-items: center; }
-div[data-testid="stCheckbox"] { height: 28px; display: flex; align-items: center; transform: translateY(var(--checkbox-nudge)); }
-/* minimal spacers */
-.mt6 { height: 6px; }
-.mt8 { height: 8px; }
-</style>
-""", unsafe_allow_html=True)
-
+# --- AI 接続テスト（原因切り分け用） ---
 with st.sidebar:
     st.header("設定")
     mode = st.radio("判定モード", ["AI (LLM + Embeddings)", "AI (Embeddings only)", "Local (RapidFuzz)"], index=0)
     embed_model = st.selectbox("Embeddings モデル", ["text-embedding-3-small", "text-embedding-3-large"], index=0)
     chat_model = st.selectbox("LLM モデル", LLM_OPTIONS, index=0)
 
-    st.markdown("<div class='mt6'></div>", unsafe_allow_html=True)
-    batch_llm = st.checkbox("LLM まとめて1回判定（高速）", value=True)
+    st.caption(f"OpenAIキー: {'✅ 検出' if CLIENT else '❌ 未設定（Secrets または 環境変数に OPENAI_API_KEY）'}")
 
-    topk = st.slider("候補K（Embeddingsで絞り込み）", 5, 20, 10)
-    embed_conf_threshold = st.slider("埋め込みだけで確定（cos類似の閾値）", 0.80, 0.98, 0.92, 0.01)
+    def openai_health_check() -> Tuple[bool, str]:
+        if CLIENT is None:
+            return False, "APIキーが見つかりません。Streamlitの Secrets か環境変数に OPENAI_API_KEY を設定してください。"
+        errors = []
+        # Embeddings
+        try:
+            CLIENT.embeddings.create(model=embed_model, input="ping")
+        except Exception as e:
+            errors.append(f"Embeddings失敗: {e}")
+        # Chat
+        try:
+            CLIENT.chat.completions.create(
+                model=chat_model,
+                messages=[{"role": "system", "content": "You are a health check."},
+                          {"role": "user", "content": "ping"}],
+                max_tokens=5,
+            )
+        except Exception as e:
+            errors.append(f"Chat失敗: {e}")
+        if errors:
+            return False, "\n".join(errors)
+        return True, "OK"
 
-    use_external = st.checkbox("無料API（OFF/OBF/OPF）でカテゴリ候補を補強する", value=True and REQUESTS_OK)
-    if not REQUESTS_OK:
-        st.caption("requests が見つかりません。`pip install requests` で有効化できます。")
-    st.caption(f"APIキー: {'✅ 検出' if OPENAI_API_KEY else '❌ 未設定（.envにOPENAI_API_KEY）'}")
+    if st.button("OpenAI接続テスト"):
+        ok, msg = openai_health_check()
+        (st.success if ok else st.error)(msg)
 
     st.divider()
     st.subheader("入力例")
@@ -527,18 +489,22 @@ with st.sidebar:
     if st.button("例を貼る"):
         st.session_state["items_text"] = sample
 
-    # デバッグ: 実際に解決されたパスを確認
-    st.caption(f"1F base: {BASE_1F_PATH or '(not found)'}")
-    st.caption(f"2F base: {BASE_2F_PATH or '(not found)'}")
-    st.caption(f"HL 1F dir: {HIGHLIGHT_DIR_1F or '(not found)'}")
-    st.caption(f"HL 2F dir: {HIGHLIGHT_DIR_2F or '(not found)'}")
-
 items_text = st.text_area(
     "買い物リスト（1行に1品）",
     value=st.session_state.get("items_text", ""),
     height=180,
     placeholder="例）\nガムテープ\nリンゴジュース\n…",
 )
+
+st.markdown("""
+<style>
+:root { --checkbox-nudge: -0.75em; }
+.rowcell { height: 28px; display: flex; align-items: center; }
+div[data-testid="stCheckbox"] { height: 28px; display: flex; align-items: center; transform: translateY(var(--checkbox-nudge)); }
+.mt6 { height: 6px; }
+.mt8 { height: 8px; }
+</style>
+""", unsafe_allow_html=True)
 
 def reset_checks() -> None:
     for k in list(st.session_state.keys()):
@@ -594,28 +560,26 @@ if run:
 
     if mode == "AI (LLM + Embeddings)" and CLIENT is not None:
         with st.spinner("Embeddings で候補抽出中…"):
-            sl_map = shortlist_many_with_embeddings(items, topk, embed_model)
+            sl_map = shortlist_many_with_embeddings(items, 10, EMBED_MODEL_DEFAULT)
 
         decided: Dict[str, Optional[dict]] = {}
         for it, (sl, top_sim) in sl_map.items():
-            if top_sim >= embed_conf_threshold:
+            if top_sim >= 0.92:
                 t = sl[0]
-                decided[it] = {
-                    "floor": t.floor, "aisle": t.aisle, "category": t.category,
-                    "confidence": int(round(top_sim * 100)), "explanation": "embedding confident"
-                }
+                decided[it] = {"floor": t.floor, "aisle": t.aisle, "category": t.category,
+                               "confidence": int(round(top_sim * 100)), "explanation": "embedding confident"}
             else:
                 decided[it] = None
 
         remaining = [it for it in items if decided[it] is None]
         hints_map: Dict[str, dict] = {}
-        if use_external and remaining:
+        if REQUESTS_OK and remaining:
             with st.spinner("無料APIからカテゴリヒント取得中…"):
                 for it in remaining:
                     hints_map[it] = external_hints(it)
 
-        if remaining and batch_llm:
-            with st.spinner("LLM まとめ判定中…"):
+        if remaining:
+            with st.spinner("LLM 判定中…"):
                 sub_map = {it: sl_map[it][0] for it in remaining}
                 decided_list = llm_pick_best_batch(remaining, sub_map, chat_model, hints_map=hints_map) or []
                 mapped = {d["item"]: d for d in decided_list if isinstance(d, dict) and d.get("item")}
@@ -623,16 +587,6 @@ if run:
                     pick = mapped.get(it)
                     if not pick:
                         t = sl_map[it][0][0]
-                        pick = {"floor": t.floor, "aisle": t.aisle, "category": t.category,
-                                "confidence": 70, "explanation": "fallback: embedding top"}
-                    decided[it] = pick
-        elif remaining:
-            with st.spinner("LLM 判定中…"):
-                for it in remaining:
-                    sl = sl_map[it][0]
-                    pick = llm_pick_best(it, sl, chat_model, hints=hints_map.get(it))
-                    if not pick:
-                        t = sl[0]
                         pick = {"floor": t.floor, "aisle": t.aisle, "category": t.category,
                                 "confidence": 70, "explanation": "fallback: embedding top"}
                     decided[it] = pick
@@ -648,29 +602,29 @@ if run:
 
     elif mode == "AI (Embeddings only)" and CLIENT is not None:
         with st.spinner("Embeddings 判定中…"):
-            sl_map = shortlist_many_with_embeddings(items, k=1, model=embed_model)
+            sl_map = shortlist_many_with_embeddings(items, k=1, model=EMBED_MODEL_DEFAULT)
         for it in items:
             t = sl_map[it][0][0]
-            results.append({
-                "品名": it, "階": t.floor, "通路": t.aisle, "カテゴリ(推定)": t.category,
-                "score": int(round(sl_map[it][1] * 100)), "explanation": "embedding only"
-            })
+            results.append({"品名": it, "階": t.floor, "通路": t.aisle, "カテゴリ(推定)": t.category,
+                            "score": int(round(sl_map[it][1] * 100)), "explanation": "embedding only"})
             details.append((it, [{"候補カテゴリ": t.category, "floor/aisle": f"{t.floor}{t.aisle}"}]))
 
     else:
+        # Local fuzzy
+        r_aliases = [r.alias for r in rows]
         for it in items:
             q = normalize_text(it)
             if HAVE_RAPIDFUZZ:
-                best = rf_process.extractOne(q, [r.alias for r in rows], scorer=rf_fuzz.WRatio)
+                best = rf_process.extractOne(q, r_aliases, scorer=rf_fuzz.WRatio)
                 if best:
                     idx = int(best[2]); sc = float(best[1]); r = rows[idx]
                     results.append({"品名": it, "階": r.floor, "通路": r.aisle, "カテゴリ(推定)": r.category,
                                     "score": int(round(sc)), "explanation": "local"})
                     continue
             else:
-                close = difflib.get_close_matches(q, [r.alias for r in rows], n=1, cutoff=0.5)  # type: ignore
+                close = difflib.get_close_matches(q, r_aliases, n=1, cutoff=0.5)  # type: ignore
                 if close:
-                    a = close[0]; i = [r.alias for r in rows].index(a); r = rows[i]
+                    a = close[0]; i = r_aliases.index(a); r = rows[i]
                     results.append({"品名": it, "階": r.floor, "通路": r.aisle, "カテゴリ(推定)": r.category,
                                     "score": 80, "explanation": "local"})
                     continue
@@ -751,16 +705,13 @@ def compute_active_aisles(df_sorted: Optional[pd.DataFrame]) -> Dict[str, List[s
     if valid.empty:
         return active
 
-    # Pylance 誤検知回避のため keys をタプルで受けてから展開
-    gb = valid.groupby(["階", "通路"], dropna=True)
-    for keys, g in gb:
-        floor_key, aisle_key = str(keys[0]), str(keys[1])
+    for (floor, aisle), g in valid.groupby(["階", "通路"], dropna=True):
         nos = g["No."].tolist()
         all_checked = all(bool(st.session_state.get(f"done_{no}", False)) for no in nos)
         if not all_checked:
-            active.setdefault(floor_key, []).append(aisle_key)
+            active.setdefault(str(floor), []).append(str(aisle))
 
-    # 重複除去 & ソート（視覚的安定性）
+    # 重複除去 & ソート
     for fl in ("1F", "2F"):
         uniq = sorted(set(active.get(fl, [])),
                       key=lambda a: (aisle_sort_key(a)[0], aisle_sort_key(a)[1], str(a)))
@@ -773,7 +724,6 @@ ALPHA_OVERLAY_2F = 0.85
 
 def render_floor_maps_with_auto_overlay(results_df: Optional[pd.DataFrame],
                                         force_active_aisles: Optional[Dict[str, List[str]]] = None) -> None:
-    """results_df から各フロアの通路を集計し、該当PNGを重ねて可視化。"""
     c1, c2 = st.columns(2)
     shown_any = False
 
@@ -788,24 +738,21 @@ def render_floor_maps_with_auto_overlay(results_df: Optional[pd.DataFrame],
                 aisles_1f = [str(a) for a in results_df[results_df["階"] == "1F"]["通路"].dropna().unique().tolist()]
         merged1 = base1
         highlighted_1f: List[str] = []
-        if aisles_1f and HIGHLIGHT_DIR_1F:
+        if aisles_1f:
             for a in aisles_1f:
                 for png_path in _find_highlight_pngs_for_aisle(HIGHLIGHT_DIR_1F, a):
                     ov = _safe_open_rgba(png_path)
                     if ov is not None:
                         merged1 = pillow_overlay_image(merged1, ov, 0, 0, 1.0, ALPHA_OVERLAY_1F)
-                        highlighted_1f.append(os.path.basename(png_path))
+                        highlighted_1f.append(png_path.stem)
         with c1:
             cap = "1F レイアウト"
-            if highlighted_1f:
-                cap += f"（ハイライト: {', '.join(sorted(set([_normalize_aisle_token(os.path.splitext(h)[0]) for h in highlighted_1f])))}）"
-            else:
-                cap += "（ハイライト無し or 全チェック完了）"
+            cap += f"（ハイライト: {', '.join(sorted(set([_normalize_aisle_token(h) for h in highlighted_1f])))}）" if highlighted_1f else "（ハイライト無し or 全チェック完了）"
             st.image(np.array(merged1), caption=cap, use_container_width=True)
             shown_any = True
     else:
         with c1:
-            st.info("1F ベース画像が見つかりません。リポジトリ直下の「素材/OK1階.png」を確認してください。")
+            st.info("1F ベース画像が見つかりません。`assets/OK1階.png` を配置してください。")
 
     # --- 2F ---
     base2 = _safe_open_rgba(BASE_2F_PATH)
@@ -818,27 +765,24 @@ def render_floor_maps_with_auto_overlay(results_df: Optional[pd.DataFrame],
                 aisles_2f = [str(a) for a in results_df[results_df["階"] == "2F"]["通路"].dropna().unique().tolist()]
         merged2 = base2
         highlighted_2f: List[str] = []
-        if aisles_2f and HIGHLIGHT_DIR_2F:
+        if aisles_2f:
             for a in aisles_2f:
                 for png_path in _find_highlight_pngs_for_aisle(HIGHLIGHT_DIR_2F, a):
                     ov = _safe_open_rgba(png_path)
                     if ov is not None:
                         merged2 = pillow_overlay_image(merged2, ov, 0, 0, 1.0, ALPHA_OVERLAY_2F)
-                        highlighted_2f.append(os.path.basename(png_path))
+                        highlighted_2f.append(png_path.stem)
         with c2:
             cap2 = "2F レイアウト"
-            if highlighted_2f:
-                cap2 += f"（ハイライト: {', '.join(sorted(set([_normalize_aisle_token(os.path.splitext(h)[0]) for h in highlighted_2f])))}）"
-            else:
-                cap2 += "（ハイライト無し or 全チェック完了）"
+            cap2 += f"（ハイライト: {', '.join(sorted(set([_normalize_aisle_token(h) for h in highlighted_2f])))}）" if highlighted_2f else "（ハイライト無し or 全チェック完了）"
             st.image(np.array(merged2), caption=cap2, use_container_width=True)
             shown_any = True
     else:
         with c2:
-            st.info("2F ベース画像が見つかりません。リポジトリ直下の「素材/OK2階.png」を確認してください。")
+            st.info("2F ベース画像が見つかりません。`assets/OK2階.png` を配置してください。")
 
     if not shown_any:
-        st.warning("ベース画像が両方見つかりません。リポジトリ内の「素材」フォルダ構成を確認してください。")
+        st.warning("ベース画像が両方見つかりません。`assets/` に PNG を配置してください。")
 
 # 常時表示
 st.markdown("### フロアマップ（1F / 2F）— 自動ハイライト")
