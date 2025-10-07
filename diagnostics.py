@@ -1,3 +1,6 @@
+# diagnostics.py
+from __future__ import annotations
+
 import os
 import time
 import json
@@ -6,7 +9,7 @@ from typing import Any, Dict
 import streamlit as st
 import pandas as pd
 
-from api_client import get_openai_client, probe_external_api
+from api_client import get_openai_client, get_api_key, probe_external_api
 
 # ===== バージョン表示用 =====
 try:
@@ -19,7 +22,7 @@ try:
     import openai as _openai_pkg
     OPENAI_VER = getattr(_openai_pkg, "__version__", "(unknown)")
 except Exception:
-    OPENAI_VER = "(unknown)"  # ← 余分なカッコを削除して修正
+    OPENAI_VER = "(unknown)"
 
 
 def _one_time_healthcheck(client) -> str:
@@ -35,10 +38,19 @@ def _one_time_healthcheck(client) -> str:
 
 
 @st.cache_data(show_spinner=False)
-def _cached_health(_dummy: int = 0) -> str:
-    # ハッシュ対象はプリミティブのみ（client を直接入れない）
-    client = get_openai_client()
+def _cached_health(cache_buster: str) -> str:
+    """
+    APIキーの指紋を cache_buster に渡して、キー設定/変更時に再計算させる。
+    """
+    client = get_openai_client(cache_buster=cache_buster)
     return _one_time_healthcheck(client)
+
+
+def _fingerprint_key(key: str | None) -> str:
+    if not key:
+        return "nokey"
+    # 生のキーは保持しないように長さ＋一部のみ
+    return f"len{len(key)}:{key[:4]}..{key[-2:]}"
 
 
 def _render_api_probe(res: Dict[str, Any]) -> None:
@@ -60,7 +72,7 @@ def _render_api_probe(res: Dict[str, Any]) -> None:
     df = pd.DataFrame(rows, columns=["ソース", "件数", "名前例", "タグ例"])
     st.dataframe(df, hide_index=True, use_container_width=True)
 
-    # 入れ子 Expander は使わず、チェックボックスで Raw JSON を開閉
+    # 入れ子 Expander は禁止なのでチェックボックスで開閉
     show_raw = st.checkbox("Raw JSON（詳細）を表示", value=False, key="__probe_show_raw__")
     if show_raw:
         st.code(json.dumps(res, ensure_ascii=False, indent=2), language="json")
@@ -73,19 +85,19 @@ def sidebar_diagnostics() -> None:
         st.caption(f"Streamlit {STREAMLIT_VER} / openai {OPENAI_VER}")
 
         # APIキーの存在表示（環境変数ベース）
-        key = os.getenv("OPENAI_API_KEY")
+        key = get_api_key()
         if key:
-            st.caption(f"APIキー検出: ✅ ({str(key)[:4]}…)")
+            st.caption(f"APIキー検出: ✅ ({key[:4]}…)")
         else:
             st.caption("APIキー検出: ❌（.env に OPENAI_API_KEY=sk-... を設定）")
 
-        # ヘルスチェック（キャッシュ）
-        st.caption(_cached_health(0))
+        # ヘルスチェック（キーの指紋でキャッシュを分ける）
+        fp = _fingerprint_key(key)
+        st.caption(_cached_health(fp))
 
         # ====== APIテスト：商品名ヒント ======
         with st.expander("APIテスト（商品名ヒント）", expanded=False):
             default_q = st.session_state.get("__probe_q__", "はちみつ")
-            # text_input は常に str を返すので、型は str で安全
             q: str = st.text_input("検索語（例：はちみつ）", value=str(default_q), key="__probe_q__")
 
             cols = st.columns([0.5, 0.5])
@@ -93,7 +105,7 @@ def sidebar_diagnostics() -> None:
 
             if do:
                 with st.spinner("問い合わせ中…"):
-                    res = probe_external_api(q)  # ← q は str（Optional ではない）
+                    res = probe_external_api(q)
                 st.session_state["__probe_result__"] = res
 
             res_any = st.session_state.get("__probe_result__", None)
