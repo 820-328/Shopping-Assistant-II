@@ -1,4 +1,3 @@
-# api_client.py
 from __future__ import annotations
 
 import os
@@ -8,58 +7,51 @@ import requests
 import streamlit as st
 from openai import OpenAI
 
-# ─────────────────────────────────────────────────────────────
-# .env を可能ならロード（python-dotenv が無ければスキップ）
-# ─────────────────────────────────────────────────────────────
+# ── .env を可能ならロード（python-dotenv が無ければスキップ）
 try:
     from dotenv import load_dotenv, find_dotenv
     load_dotenv(find_dotenv(), override=False)
 except Exception:
     pass
 
-
-# ─────────────────────────────────────────────────────────────
+# ============================================
 # OpenAI Client
-# ─────────────────────────────────────────────────────────────
+# ============================================
 
-def get_api_key() -> Optional[str]:
+def _get_api_key() -> Optional[str]:
     """
-    環境変数（.env を含む）から API キーを取得。
-    ※ st.secrets は使わない（「No secrets found」警告を出さないため）
+    ローカルでは .env / 環境変数のみを見る。
+    （st.secrets を参照しないことで「No secrets found」警告を回避）
     """
-    return os.getenv("OPENAI_API_KEY") or None
+    key = os.getenv("OPENAI_API_KEY")
+    return key if key else None
 
 
 @st.cache_resource(show_spinner=False)
-def get_openai_client(cache_buster: str = "") -> Optional[OpenAI]:
+def get_openai_client() -> Optional[OpenAI]:
     """
-    OpenAI クライアントを返す。キーが無ければ None。
-    SDK 1.109.1 用。cache_buster はキャッシュ無効化用のダミー引数。
+    診断や推論で使う OpenAI クライアント。
+    1.109.1 系 SDK に合わせ、api_key のみ明示（proxies等は渡さない）。
     """
-    key = get_api_key()
+    key = _get_api_key()
     if not key:
         return None
 
-    # 内部で参照される場合に備えて環境変数にも反映
+    # 念のため環境変数にも反映（SDK内部参照のケースに備える）
     os.environ.setdefault("OPENAI_API_KEY", key)
 
     try:
         client = OpenAI(api_key=key, timeout=10.0, max_retries=1)
         return client
     except Exception as e:
-        # 診断側で参照できるよう session_state に格納（文字列で固定）
         st.session_state["__api_client_error__"] = f"OpenAI init failed: {e!r}"
         return None
 
-
-# ─────────────────────────────────────────────────────────────
+# ============================================
 # External product-name hints (OFF / OBF / OPF)
-# ─────────────────────────────────────────────────────────────
+# ============================================
 
-HEADERS: Dict[str, str] = {
-    "User-Agent": "ShoppingAssistant/1.0 (+contact: you@example.com)"
-}
-
+HEADERS = {"User-Agent": "ShoppingAssistant/1.0 (+contact: you@example.com)"}
 
 def _fetch_json(url: str, params: Dict[str, Any]) -> Dict[str, Any]:
     try:
@@ -69,11 +61,8 @@ def _fetch_json(url: str, params: Dict[str, Any]) -> Dict[str, Any]:
     except Exception:
         return {}
 
-
 def _strip_lang(tag: str) -> str:
-    # 'en:beverages' → 'beverages'
     return tag.split(":", 1)[1] if ":" in tag else tag
-
 
 def _off_search(q: str, page_size: int = 12) -> Dict[str, Any]:
     js = _fetch_json(
@@ -83,14 +72,11 @@ def _off_search(q: str, page_size: int = 12) -> Dict[str, Any]:
     names: List[str] = []
     tags: List[str] = []
     for p in (js.get("products") or []):
-        pname = p.get("product_name")
-        if isinstance(pname, str) and pname:
-            names.append(pname)
+        if p.get("product_name"):
+            names.append(p["product_name"])
         for t in (p.get("categories_tags") or []):
-            if isinstance(t, str):
-                tags.append(_strip_lang(t))
+            tags.append(_strip_lang(t))
     return {"count": len(js.get("products") or []), "names": names, "tags": tags}
-
 
 def _obf_search(q: str, page_size: int = 12) -> Dict[str, Any]:
     js = _fetch_json(
@@ -100,14 +86,11 @@ def _obf_search(q: str, page_size: int = 12) -> Dict[str, Any]:
     names: List[str] = []
     tags: List[str] = []
     for p in (js.get("products") or []):
-        pname = p.get("product_name")
-        if isinstance(pname, str) and pname:
-            names.append(pname)
+        if p.get("product_name"):
+            names.append(p["product_name"])
         for t in (p.get("categories_tags") or []):
-            if isinstance(t, str):
-                tags.append(_strip_lang(t))
+            tags.append(_strip_lang(t))
     return {"count": len(js.get("products") or []), "names": names, "tags": tags}
-
 
 def _opf_search(q: str, page_size: int = 12) -> Dict[str, Any]:
     js = _fetch_json(
@@ -117,32 +100,26 @@ def _opf_search(q: str, page_size: int = 12) -> Dict[str, Any]:
     names: List[str] = []
     tags: List[str] = []
     for p in (js.get("products") or []):
-        pname = p.get("product_name")
-        if isinstance(pname, str) and pname:
-            names.append(pname)
+        if p.get("product_name"):
+            names.append(p["product_name"])
         for t in (p.get("categories_tags") or []):
-            if isinstance(t, str):
-                tags.append(_strip_lang(t))
+            tags.append(_strip_lang(t))
     return {"count": len(js.get("products") or []), "names": names, "tags": tags}
-
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def probe_external_api(q: str) -> Dict[str, Any]:
-    """
-    診断用：OFF/OBF/OPF を横断して件数・サンプル名・タグを返す。
-    """
-    query = (q or "").strip()
-    if not query:
+    """診断用：OFF/OBF/OPF を横断して件数・サンプル名・タグを返す。"""
+    q = (q or "").strip()
+    if not q:
         return {"ok": False, "off": {}, "obf": {}, "opf": {}}
 
-    off = _off_search(query)
-    obf = _obf_search(query)
-    opf = _opf_search(query)
+    off = _off_search(q)
+    obf = _obf_search(q)
+    opf = _opf_search(q)
     ok = any([off.get("count", 0), obf.get("count", 0), opf.get("count", 0)])
     return {"ok": bool(ok), "off": off, "obf": obf, "opf": opf}
 
-
-# 互換API：旧コードが参照する external_hints を提供
+# ---- 互換API：旧コードが参照する external_hints を提供
 @st.cache_data(show_spinner=False, ttl=3600)
 def external_hints(q: str, max_tags: int = 20) -> Dict[str, Any]:
     """
@@ -153,8 +130,8 @@ def external_hints(q: str, max_tags: int = 20) -> Dict[str, Any]:
 
     def _top_tags(d: Any) -> List[str]:
         if isinstance(d, dict):
-            raw = d.get("tags") or []
-            return [t for t in raw if isinstance(t, str)]
+            t = d.get("tags") or []
+            return [x for x in t if isinstance(x, str)]
         return []
 
     off_tags = _top_tags(res.get("off"))
@@ -165,8 +142,7 @@ def external_hints(q: str, max_tags: int = 20) -> Dict[str, Any]:
     for chunk in (off_tags, obf_tags, opf_tags):
         merged.extend(chunk)
 
-    # 重複排除して max_tags までに整形
-    seen: set[str] = set()
+    seen = set()
     uniq: List[str] = []
     for t in merged:
         if t not in seen:
