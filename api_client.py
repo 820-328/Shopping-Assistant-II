@@ -1,154 +1,185 @@
+# api_client.py
 from __future__ import annotations
 
 import os
-from typing import Dict, List, Optional, Any, TypedDict
+from typing import Any, Dict, List, Optional
 
 import requests
+import streamlit as st
+from openai import OpenAI
 
-# ===== 外部API（OpenFood/Beauty/Products Facts） =====
+# ─────────────────────────────────────────────────────────────
+# .env を可能ならロード（python-dotenv が無ければスキップ）
+# ─────────────────────────────────────────────────────────────
+try:
+    from dotenv import load_dotenv, find_dotenv
+    load_dotenv(find_dotenv(), override=False)
+except Exception:
+    pass
 
-HTTP_TIMEOUT = 6.0  # 秒: 外部API呼び出しのタイムアウト
-REQUEST_HEADERS = {
+
+# ─────────────────────────────────────────────────────────────
+# OpenAI Client
+# ─────────────────────────────────────────────────────────────
+
+def get_api_key() -> Optional[str]:
+    """
+    環境変数（.env を含む）から API キーを取得。
+    ※ st.secrets は使わない（「No secrets found」警告を出さないため）
+    """
+    return os.getenv("OPENAI_API_KEY") or None
+
+
+@st.cache_resource(show_spinner=False)
+def get_openai_client(cache_buster: str = "") -> Optional[OpenAI]:
+    """
+    OpenAI クライアントを返す。キーが無ければ None。
+    SDK 1.109.1 用。cache_buster はキャッシュ無効化用のダミー引数。
+    """
+    key = get_api_key()
+    if not key:
+        return None
+
+    # 内部で参照される場合に備えて環境変数にも反映
+    os.environ.setdefault("OPENAI_API_KEY", key)
+
+    try:
+        client = OpenAI(api_key=key, timeout=10.0, max_retries=1)
+        return client
+    except Exception as e:
+        # 診断側で参照できるよう session_state に格納（文字列で固定）
+        st.session_state["__api_client_error__"] = f"OpenAI init failed: {e!r}"
+        return None
+
+
+# ─────────────────────────────────────────────────────────────
+# External product-name hints (OFF / OBF / OPF)
+# ─────────────────────────────────────────────────────────────
+
+HEADERS: Dict[str, str] = {
     "User-Agent": "ShoppingAssistant/1.0 (+contact: you@example.com)"
 }
 
-OFF_URL = "https://world.openfoodfacts.org/api/v2/search"
-OBF_URL = "https://world.openbeautyfacts.org/api/v2/search"
-OPF_URL = "https://world.openproductsfacts.org/api/v2/search"
 
-
-def _strip_lang(tag: str) -> str:
-    return tag.split(":", 1)[1] if ":" in tag else tag
-
-
-def _fetch_json(url: str, params: Dict) -> Dict:
-    """GET→JSON 取得（失敗時は {} を返す）"""
+def _fetch_json(url: str, params: Dict[str, Any]) -> Dict[str, Any]:
     try:
-        r = requests.get(url, params=params, headers=REQUEST_HEADERS, timeout=HTTP_TIMEOUT)
+        r = requests.get(url, params=params, headers=HEADERS, timeout=6)
         r.raise_for_status()
         return r.json()
     except Exception:
         return {}
 
 
-def external_hints(q: str) -> Dict:
+def _strip_lang(tag: str) -> str:
+    # 'en:beverages' → 'beverages'
+    return tag.split(":", 1)[1] if ":" in tag else tag
+
+
+def _off_search(q: str, page_size: int = 12) -> Dict[str, Any]:
+    js = _fetch_json(
+        "https://world.openfoodfacts.org/api/v2/search",
+        {"search_terms": q, "page_size": page_size, "fields": "product_name,categories_tags"},
+    )
+    names: List[str] = []
+    tags: List[str] = []
+    for p in (js.get("products") or []):
+        pname = p.get("product_name")
+        if isinstance(pname, str) and pname:
+            names.append(pname)
+        for t in (p.get("categories_tags") or []):
+            if isinstance(t, str):
+                tags.append(_strip_lang(t))
+    return {"count": len(js.get("products") or []), "names": names, "tags": tags}
+
+
+def _obf_search(q: str, page_size: int = 12) -> Dict[str, Any]:
+    js = _fetch_json(
+        "https://world.openbeautyfacts.org/api/v2/search",
+        {"search_terms": q, "page_size": page_size, "fields": "product_name,categories_tags"},
+    )
+    names: List[str] = []
+    tags: List[str] = []
+    for p in (js.get("products") or []):
+        pname = p.get("product_name")
+        if isinstance(pname, str) and pname:
+            names.append(pname)
+        for t in (p.get("categories_tags") or []):
+            if isinstance(t, str):
+                tags.append(_strip_lang(t))
+    return {"count": len(js.get("products") or []), "names": names, "tags": tags}
+
+
+def _opf_search(q: str, page_size: int = 12) -> Dict[str, Any]:
+    js = _fetch_json(
+        "https://world.openproductsfacts.org/api/v2/search",
+        {"search_terms": q, "page_size": page_size, "fields": "product_name,categories_tags"},
+    )
+    names: List[str] = []
+    tags: List[str] = []
+    for p in (js.get("products") or []):
+        pname = p.get("product_name")
+        if isinstance(pname, str) and pname:
+            names.append(pname)
+        for t in (p.get("categories_tags") or []):
+            if isinstance(t, str):
+                tags.append(_strip_lang(t))
+    return {"count": len(js.get("products") or []), "names": names, "tags": tags}
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def probe_external_api(q: str) -> Dict[str, Any]:
     """
-    既存の「カテゴリタグ候補」関数。
-    tags: 統合カテゴリタグ上位（去重）
-    sources: 各APIの元タグ
+    診断用：OFF/OBF/OPF を横断して件数・サンプル名・タグを返す。
     """
-    off = _fetch_json(OFF_URL, {"search_terms": q, "page_size": 12, "fields": "product_name,categories_tags"})
-    obf = _fetch_json(OBF_URL, {"search_terms": q, "page_size": 12, "fields": "product_name,categories_tags"})
-    opf = _fetch_json(OPF_URL, {"search_terms": q, "page_size": 12, "fields": "product_name,categories_tags"})
+    query = (q or "").strip()
+    if not query:
+        return {"ok": False, "off": {}, "obf": {}, "opf": {}}
 
-    def _collect_tags(js):
-        s = set()
-        for p in (js.get("products") or []):
-            for t in (p.get("categories_tags") or []):
-                s.add(_strip_lang(t))
-        return list(s)
+    off = _off_search(query)
+    obf = _obf_search(query)
+    opf = _opf_search(query)
+    ok = any([off.get("count", 0), obf.get("count", 0), opf.get("count", 0)])
+    return {"ok": bool(ok), "off": off, "obf": obf, "opf": opf}
 
-    off_tags = _collect_tags(off)
-    obf_tags = _collect_tags(obf)
-    opf_tags = _collect_tags(opf)
 
-    merged = []
-    seen = set()
-    for lst in (off_tags, obf_tags, opf_tags):
-        merged.extend(lst or [])
+# 互換API：旧コードが参照する external_hints を提供
+@st.cache_data(show_spinner=False, ttl=3600)
+def external_hints(q: str, max_tags: int = 20) -> Dict[str, Any]:
+    """
+    旧 ai/functions が期待していた形式:
+      { "tags": [...], "sources": {"off":[...],"obf":[...],"opf":[...]} }
+    """
+    res = probe_external_api(q or "")
 
-    out: List[str] = []
+    def _top_tags(d: Any) -> List[str]:
+        if isinstance(d, dict):
+            raw = d.get("tags") or []
+            return [t for t in raw if isinstance(t, str)]
+        return []
+
+    off_tags = _top_tags(res.get("off"))
+    obf_tags = _top_tags(res.get("obf"))
+    opf_tags = _top_tags(res.get("opf"))
+
+    merged: List[str] = []
+    for chunk in (off_tags, obf_tags, opf_tags):
+        merged.extend(chunk)
+
+    # 重複排除して max_tags までに整形
+    seen: set[str] = set()
+    uniq: List[str] = []
     for t in merged:
         if t not in seen:
             seen.add(t)
-            out.append(t)
-        if len(out) >= 20:
+            uniq.append(t)
+        if len(uniq) >= max_tags:
             break
 
-    return {"tags": out, "sources": {"off": off_tags[:20], "obf": obf_tags[:20], "opf": opf_tags[:20]}}
-
-
-# 診断用の厳密な型（Pylance対策）
-class SourceResult(TypedDict):
-    count: int
-    names: List[str]
-    tags: List[str]
-
-
-class ProbeResult(TypedDict, total=False):
-    ok: bool
-    off: SourceResult
-    obf: SourceResult
-    opf: SourceResult
-
-
-def probe_external_api(q: str, page_size: int = 8) -> ProbeResult:
-    """
-    診断用：商品名（product_name）とカテゴリタグの取得テスト。
-    返却フォーマット:
-    {
-      "ok": bool,
-      "off": {"count": 12, "names": [...], "tags": [...]},
-      "obf": {...},
-      "opf": {...}
+    return {
+        "tags": uniq,
+        "sources": {
+            "off": off_tags[:max_tags],
+            "obf": obf_tags[:max_tags],
+            "opf": opf_tags[:max_tags],
+        },
     }
-    """
-    params = {"search_terms": q, "page_size": page_size, "fields": "product_name,categories_tags"}
-
-    off = _fetch_json(OFF_URL, params)
-    obf = _fetch_json(OBF_URL, params)
-    opf = _fetch_json(OPF_URL, params)
-
-    def _names(js: Dict) -> List[str]:
-        return [p.get("product_name") for p in (js.get("products") or []) if p.get("product_name")]
-
-    def _tags(js: Dict) -> List[str]:
-        s = set()
-        for p in (js.get("products") or []):
-            for t in (p.get("categories_tags") or []):
-                s.add(_strip_lang(t))
-        return list(s)
-
-    res: ProbeResult = {
-        "off": {"count": len(off.get("products") or []), "names": _names(off), "tags": _tags(off)},
-        "obf": {"count": len(obf.get("products") or []), "names": _names(obf), "tags": _tags(obf)},
-        "opf": {"count": len(opf.get("products") or []), "names": _names(opf), "tags": _tags(opf)},
-    }
-    res["ok"] = any((res["off"]["count"], res["obf"]["count"], res["opf"]["count"]))
-    return res
-
-
-# ===== OpenAI クライアント =====
-
-# アプリ全体で参照する「処理タイムアウト（秒）」推奨値
-TIMEOUT_CHAT = 120.0
-TIMEOUT_EMBEDDINGS = 45.0
-
-
-def _get_api_key() -> Optional[str]:
-    # まず環境変数を優先
-    env_key = os.getenv("OPENAI_API_KEY")
-    if env_key:
-        return env_key
-    # st.secrets は診断側での表示に限定し、ここでは触らない
-    return None
-
-
-def get_openai_client():
-    """
-    OpenAI 1.x クライアントを返す。キーが無い/失敗時は None。
-    """
-    try:
-        from openai import OpenAI  # import 失敗時は None を返す
-    except Exception:
-        return None
-
-    key = _get_api_key()
-    if not key:
-        return None
-
-    try:
-        # 1.x の標準初期化（proxies 等は渡さない）
-        return OpenAI(api_key=key)
-    except Exception:
-        return None
