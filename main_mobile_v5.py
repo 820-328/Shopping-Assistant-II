@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Shopping Assistant mobile-friendly UI (v5.02).
+Shopping Assistant mobile-friendly UI (v5.03).
 main.py と同等の機能を持ちながら、スマートフォンでも見やすいレイアウトに整形。
 """
 
@@ -35,6 +35,7 @@ st.markdown(
       overscroll-behavior-y: none;
       background: #f4f5f7;
     }}
+    :root { color-scheme: light; }
     .block-container {{
       max-width: min(1200px, 95vw) !important;
       padding: 0.75rem 1.2rem 5rem;
@@ -139,6 +140,15 @@ with action_cols[1]:
         st.rerun()
 
 st.divider()
+
+# VS Code 未定義警告の回避用デフォルト（サイドバーで上書きされます）
+mode: str = "AI (LLM + Embeddings)"
+embed_model: str = "text-embedding-3-small"
+chat_model: str = "gpt-4o-mini"
+batch_llm: bool = True
+topk: int = 10
+embed_conf_threshold: float = 0.92
+use_external: bool = True
 
 # ===== 表示設定 & プレースホルダー =====================================
 st.subheader("表示設定")
