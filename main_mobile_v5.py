@@ -1,4 +1,4 @@
-"""
+﻿"""
 Shopping Assistant mobile-friendly UI (v5.08).
 スマートフォンでも見やすいレイアウト。AI 設定とサンプル操作ガイドはサイドバー下部へ統一。
 """
@@ -168,7 +168,11 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.title("Shopping Assistant（モバイル）")
+st.markdown("""
+<h1 class="sa-title">Shopping Assistant <span class="sa-title-sub">（モバイル）</span></h1>
+""",
+    unsafe_allow_html=True,
+)
 st.caption("買い物リストを貼り付けて『検索』を押すと、フロアと通路を自動で提案します。")
 
 
