@@ -23,7 +23,7 @@ from functions import (
 st.set_page_config(
     page_title="Shopping Assistant（モバイル）",
     page_icon="🛒",
-    layout="centered",
+    layout="wide",
     initial_sidebar_state="collapsed",
 )
 
@@ -36,8 +36,8 @@ st.markdown(
       background: #f4f5f7;
     }}
     .block-container {{
-      max-width: {MAX_CONTENT_PX}px !important;
-      padding: 0.75rem 0.9rem 5rem;
+      max-width: min(1200px, 95vw) !important;
+      padding: 0.75rem 1.2rem 5rem;
     }}
     .mobile-card {{
       border-radius: 14px;
@@ -77,8 +77,9 @@ st.markdown(
     .action-row button {{
       width: 100%;
     }}
-    @media (max-width: 480px) {{
+    @media (max-width: 640px) {{
       .block-container {{
+        max-width: {MAX_CONTENT_PX}px !important;
         padding-left: 0.65rem;
         padding-right: 0.65rem;
       }}
@@ -178,6 +179,28 @@ with st.expander("AI 設定（必要な場合のみ）", expanded=False):
     embed_conf_threshold = st.slider("Embeddings 類似度しきい値", 0.80, 0.98, 0.92, 0.01)
     use_external = st.checkbox("外部 API（OFF/OBF/OPF）を補助利用", value=True)
 
+with st.sidebar:
+    st.divider()
+    with st.expander("AI �ݒ�i�K�v�ȏꍇ�̂݁j", expanded=False):
+        mode = st.radio(
+            "�������[�h",
+            ["AI (LLM + Embeddings)", "AI (Embeddings only)", "Local (RapidFuzz)"],
+            index=0,
+        )
+        embed_model = st.selectbox(
+            "Embeddings ���f��",
+            ["text-embedding-3-small", "text-embedding-3-large"],
+            index=0,
+        )
+        chat_model = st.selectbox(
+            "LLM ���f��",
+            ["gpt-4o-mini", "gpt-4.1-mini"],
+            index=0,
+        )
+        batch_llm = st.checkbox("LLM ���܂Ƃ߂� 1 �x�Ăяo��", value=True)
+        topk = st.slider("��␔�iEmbeddings �V���[�g���X�g�j", 5, 20, 10)
+        embed_conf_threshold = st.slider("Embeddings �ގ��x�������l", 0.80, 0.98, 0.92, 0.01)
+        use_external = st.checkbox("�O�� API�iOFF/OBF/OPF�j��⏕���p", value=True)
 sidebar_diagnostics()
 
 # ===== 検索実行 ============================================================
@@ -223,7 +246,7 @@ with results_container:
     for floor in floors_to_show:
         title = floor_title_map.get(floor, floor)
         st.markdown(f"--- {title} ---")
-        list_col, map_col = st.columns([0.55, 0.45])
+        list_col, map_col = st.columns([0.46, 0.54])
 
         rows = floor_records.get(floor, [])
         if not rows:
