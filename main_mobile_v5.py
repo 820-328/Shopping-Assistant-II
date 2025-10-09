@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Shopping Assistant mobile-friendly UI (v5.01).
+Shopping Assistant mobile-friendly UI (v5.02).
 main.py と同等の機能を持ちながら、スマートフォンでも見やすいレイアウトに整形。
 """
 
@@ -201,6 +201,14 @@ with st.sidebar:
         topk = st.slider("��␔�iEmbeddings �V���[�g���X�g�j", 5, 20, 10)
         embed_conf_threshold = st.slider("Embeddings �ގ��x�������l", 0.80, 0.98, 0.92, 0.01)
         use_external = st.checkbox("�O�� API�iOFF/OBF/OPF�j��⏕���p", value=True)
+    with st.expander("サンプル / 操作ガイド", expanded=False):
+        st.markdown(
+            "- クリップボードのリストを貼り付けると素早く試せます。\n"
+            "- 各チェックに応じてアクティブ通路が更新されます。"
+        )
+        if st.button("サンプルリストを貼り付け", use_container_width=True, key="__paste_sample_btn__"):
+            st.session_state["__paste_sample__"] = True
+            st.rerun()
 sidebar_diagnostics()
 
 # ===== 検索実行 ============================================================
