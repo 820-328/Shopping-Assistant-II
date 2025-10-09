@@ -88,13 +88,37 @@ def shortlist_many_with_embeddings(
     queries: List[str], k: int, model: str, rows: List[CategoryRow], enriched: Tuple[str, ...]
 ):
     client = get_openai_client()
+    # Local fallback using RapidFuzz/difflib when OpenAI client or embeddings are unavailable
+    def _local_shortlist(q: str):
+        aliases = [r.alias for r in rows]
+        qn = normalize_text(SYNONYMS.get(q, q))
+        try:
+            if HAVE_RAPIDFUZZ:
+                bests = rf_process.extract(qn, aliases, scorer=rf_fuzz.WRatio, limit=k)
+                idxs = [int(b[2]) for b in bests] if bests else []
+                shortlist = [rows[i] for i in idxs]
+                top_sim = float(bests[0][1]) / 100.0 if bests else 0.0
+                return (shortlist if shortlist else rows[:k], top_sim)
+            else:
+                import difflib
+                matches = difflib.get_close_matches(qn, aliases, n=k, cutoff=0.0)  # type: ignore
+                shortlist = []
+                for a in matches:
+                    try:
+                        shortlist.append(rows[aliases.index(a)])
+                    except Exception:
+                        pass
+                return (shortlist if shortlist else rows[:k], 0.0)
+        except Exception:
+            return (rows[:k], 0.0)
+
     if client is None:
-        return {q: (rows[:k], 0.0) for q in queries}
+        return {q: _local_shortlist(q) for q in queries}
     q_norm = [normalize_text(SYNONYMS.get(q, q)) for q in queries]
     qvecs = embed_texts(q_norm, model)
     base_vecs = _cache_alias_embeddings(enriched, model, f"key-{model}")
     if qvecs is None or base_vecs is None:
-        return {q: (rows[:k], 0.0) for q in queries}
+        return {q: _local_shortlist(q) for q in queries}
     alias_unit = _unit_rows(base_vecs)
     out = {}
     for qi, qv in enumerate(qvecs):
@@ -232,6 +256,9 @@ def classify_items(
     details: List[Tuple[str, List[Dict[str, str]]]] = []
 
     client = get_openai_client()
+    # If AI mode is selected but OpenAI client is unavailable, downgrade to Local
+    if mode.startswith("AI") and client is None:
+        mode = "Local (RapidFuzz)"
 
     if mode == "AI (LLM + Embeddings)" and client is not None:
         sl_map = shortlist_many_with_embeddings(items, topk, embed_model, rows, enriched)

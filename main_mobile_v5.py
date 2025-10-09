@@ -1,5 +1,5 @@
 """
-Shopping Assistant mobile-friendly UI (v5.05).
+Shopping Assistant mobile-friendly UI (v5.06).
 スマートフォンでも見やすいレイアウト。AI 設定とサンプル操作ガイドはサイドバー下部へ統一。
 """
 
