@@ -5,7 +5,13 @@ from typing import Any, Dict, List, Optional
 
 import requests
 import streamlit as st
-from openai import OpenAI
+
+# OpenAI SDK が未導入の環境（例: ビルド失敗や軽量実行）でも
+# アプリ全体が ImportError で停止しないようにするためのガード。
+try:
+    from openai import OpenAI  # type: ignore
+except Exception:
+    OpenAI = None  # type: ignore[assignment]
 
 # ── .env を可能ならロード（python-dotenv が無ければスキップ）
 try:
@@ -28,20 +34,21 @@ def _get_api_key() -> Optional[str]:
 
 
 @st.cache_resource(show_spinner=False)
-def get_openai_client() -> Optional[OpenAI]:
+def get_openai_client() -> Optional[Any]:
     """
     診断や推論で使う OpenAI クライアント。
     1.109.1 系 SDK に合わせ、api_key のみ明示（proxies等は渡さない）。
     """
     key = _get_api_key()
-    if not key:
+    # SDK 未導入 or API キー未設定の場合は機能を無効化
+    if OpenAI is None or not key:
         return None
 
     # 念のため環境変数にも反映（SDK内部参照のケースに備える）
     os.environ.setdefault("OPENAI_API_KEY", key)
 
     try:
-        client = OpenAI(api_key=key, timeout=10.0, max_retries=1)
+        client = OpenAI(api_key=key, timeout=10.0, max_retries=1)  # type: ignore[misc]
         return client
     except Exception as e:
         st.session_state["__api_client_error__"] = f"OpenAI init failed: {e!r}"
