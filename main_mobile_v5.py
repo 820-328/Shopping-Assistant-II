@@ -1,7 +1,6 @@
-# -*- coding: utf-8 -*-
 """
-Shopping Assistant mobile-friendly UI (v5.04).
-main.py と同等の機能を持ちながら、スマートフォンでも見やすいレイアウトに整形。
+Shopping Assistant mobile-friendly UI (v5.05).
+スマートフォンでも見やすいレイアウト。AI 設定とサンプル操作ガイドはサイドバー下部へ統一。
 """
 
 from __future__ import annotations
@@ -18,6 +17,7 @@ from functions import (
     compute_active_aisles,
     render_floor_maps_with_auto_overlay,
 )
+
 
 # ===== ページ設定 / CSS ====================================================
 st.set_page_config(
@@ -75,18 +75,14 @@ st.markdown(
       color: #4338ca;
       font-weight: 600;
     }}
-    .action-row button {{
-      width: 100%;
-    }}
+    .action-row button {{ width: 100%; }}
     @media (max-width: 640px) {{
       .block-container {{
         max-width: {MAX_CONTENT_PX}px !important;
         padding-left: 0.65rem;
         padding-right: 0.65rem;
       }}
-      .mobile-title {{
-        font-size: clamp(0.95rem, 1.8vw + 0.8rem, 1.05rem);
-      }}
+      .mobile-title {{ font-size: clamp(0.95rem, 1.8vw + 0.8rem, 1.05rem); }}
     }}
     </style>
     """,
@@ -94,7 +90,8 @@ st.markdown(
 )
 
 st.title("Shopping Assistant（モバイル）")
-st.caption("買い物リストを貼り付けて「検索」を押すと、フロアと通路を自動で提案します。")
+st.caption("買い物リストを貼り付けて『検索』を押すと、フロアと通路を自動で提案します。")
+
 
 # ===== セッションステート制御 =============================================
 if st.session_state.get("__paste_sample__", False):
@@ -142,13 +139,14 @@ with action_cols[1]:
 st.divider()
 
 # VS Code 未定義警告の回避用デフォルト（サイドバーで上書きされます）
-mode: str = "AI (LLM + Embeddings)"
+mode: str = "Local (RapidFuzz)"
 embed_model: str = "text-embedding-3-small"
 chat_model: str = "gpt-4o-mini"
 batch_llm: bool = True
 topk: int = 10
 embed_conf_threshold: float = 0.92
 use_external: bool = True
+
 
 # ===== 表示設定 & プレースホルダー =====================================
 st.subheader("表示設定")
@@ -158,59 +156,10 @@ results_container = st.container()
 
 st.divider()
 
-# ===== ボトムセクション（ガイド / AI設定） ================================
-with st.expander("サンプル / 操作ガイド", expanded=False):
-    st.markdown(
-        "- クリップボードのリストを貼り付けると自動で検索します。\n"
-        "- 各チェックを付けるとアクティブな通路が更新されます。"
-    )
-    if st.button("サンプルリストを貼り付け", use_container_width=True):
-        st.session_state["__paste_sample__"] = True
-        st.rerun()
 
-with st.expander("AI 設定（必要な場合のみ）", expanded=False):
-    mode = st.radio(
-        "検索モード",
-        ["AI (LLM + Embeddings)", "AI (Embeddings only)", "Local (RapidFuzz)"],
-        index=0,
-    )
-    embed_model = st.selectbox(
-        "Embeddings モデル",
-        ["text-embedding-3-small", "text-embedding-3-large"],
-        index=0,
-    )
-    chat_model = st.selectbox(
-        "LLM モデル",
-        ["gpt-4o-mini", "gpt-4.1-mini"],
-        index=0,
-    )
-    batch_llm = st.checkbox("LLM をまとめて 1 度呼び出す", value=True)
-    topk = st.slider("候補数（Embeddings ショートリスト）", 5, 20, 10)
-    embed_conf_threshold = st.slider("Embeddings 類似度しきい値", 0.80, 0.98, 0.92, 0.01)
-    use_external = st.checkbox("外部 API（OFF/OBF/OPF）を補助利用", value=True)
-
+# ===== サイドバー（下部にガイド / AI 設定 / 診断） ======================
 with st.sidebar:
     st.divider()
-    with st.expander("AI �ݒ�i�K�v�ȏꍇ�̂݁j", expanded=False):
-        mode = st.radio(
-            "�������[�h",
-            ["AI (LLM + Embeddings)", "AI (Embeddings only)", "Local (RapidFuzz)"],
-            index=0,
-        )
-        embed_model = st.selectbox(
-            "Embeddings ���f��",
-            ["text-embedding-3-small", "text-embedding-3-large"],
-            index=0,
-        )
-        chat_model = st.selectbox(
-            "LLM ���f��",
-            ["gpt-4o-mini", "gpt-4.1-mini"],
-            index=0,
-        )
-        batch_llm = st.checkbox("LLM ���܂Ƃ߂� 1 �x�Ăяo��", value=True)
-        topk = st.slider("��␔�iEmbeddings �V���[�g���X�g�j", 5, 20, 10)
-        embed_conf_threshold = st.slider("Embeddings �ގ��x�������l", 0.80, 0.98, 0.92, 0.01)
-        use_external = st.checkbox("�O�� API�iOFF/OBF/OPF�j��⏕���p", value=True)
     with st.expander("サンプル / 操作ガイド", expanded=False):
         st.markdown(
             "- クリップボードのリストを貼り付けると素早く試せます。\n"
@@ -219,7 +168,30 @@ with st.sidebar:
         if st.button("サンプルリストを貼り付け", use_container_width=True, key="__paste_sample_btn__"):
             st.session_state["__paste_sample__"] = True
             st.rerun()
+
+    with st.expander("AI 設定（必要な場合のみ）", expanded=False):
+        mode = st.radio(
+            "検索モード",
+            ["AI (LLM + Embeddings)", "AI (Embeddings only)", "Local (RapidFuzz)"],
+            index=2,
+        )
+        embed_model = st.selectbox(
+            "Embeddings モデル",
+            ["text-embedding-3-small", "text-embedding-3-large"],
+            index=0,
+        )
+        chat_model = st.selectbox(
+            "LLM モデル",
+            ["gpt-4o-mini", "gpt-4.1-mini"],
+            index=0,
+        )
+        batch_llm = st.checkbox("LLM をまとめて 1 度呼び出す", value=True)
+        topk = st.slider("候補数（Embeddings ショートリスト）", 5, 20, 10)
+        embed_conf_threshold = st.slider("Embeddings 類似度しきい値", 0.80, 0.98, 0.92, 0.01)
+        use_external = st.checkbox("外部 API（OFF/OBF/OPF）を補助利用", value=True)
+
 sidebar_diagnostics()
+
 
 # ===== 検索実行 ============================================================
 if run_clicked:
@@ -241,6 +213,7 @@ if run_clicked:
             )
         st.session_state["__last_results__"] = df_sorted.copy()
         st.session_state["__last_details__"] = details
+
 
 # ===== チェックリスト & フロアマップ（プレースホルダーに出力） ============
 results_df = cast(Optional[pd.DataFrame], st.session_state.get("__last_results__"))
@@ -307,3 +280,4 @@ with results_container:
             render_floor_maps_with_auto_overlay(results_df, active_aisles, floor)
 
 # ----- End -----
+
