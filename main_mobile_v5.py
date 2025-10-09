@@ -1,5 +1,5 @@
 """
-Shopping Assistant mobile-friendly UI (v5.07).
+Shopping Assistant mobile-friendly UI (v5.08).
 スマートフォンでも見やすいレイアウト。AI 設定とサンプル操作ガイドはサイドバー下部へ統一。
 """
 
@@ -86,6 +86,85 @@ st.markdown(
     }}
     </style>
     """,
+    unsafe_allow_html=True,
+)
+
+# 追加のテーマ上書き（f文字列ではないブロックで安全に適用）
+st.markdown(
+    """
+<style>
+:root {
+  --sa-orange: #F97316;   /* オレンジ */
+  --sa-vermilion: #E34234;/* 朱色 */
+  --primary-color: var(--sa-orange);
+  --secondary-background-color: #FFF6EF;
+  --text-color: #1F2937;
+  --background-color: #F7F5F2;
+}
+
+/* アプリ背景とテキスト色 */
+[data-testid="stAppViewContainer"] {
+  background: var(--background-color) !important;
+  color: var(--text-color) !important;
+}
+
+/* サイドバーと出し入れボタン（＞）を強調 */
+[data-testid="stSidebar"] {
+  border-right: 3px solid var(--sa-vermilion);
+  background: #FFF6EF;
+}
+[data-testid="collapsedControl"] {
+  position: fixed;
+  left: 0;
+  top: 64px;
+  z-index: 1000;
+}
+[data-testid="collapsedControl"] button {
+  background: var(--sa-orange) !important;
+  color: #fff !important;
+  border: 2px solid var(--sa-vermilion) !important;
+  width: 48px; height: 48px;
+  border-radius: 0 12px 12px 0;
+  box-shadow: 0 6px 18px rgba(0,0,0,0.22);
+}
+[data-testid="collapsedControl"] svg {
+  width: 22px; height: 22px;
+  fill: #fff !important;
+}
+
+/* 検索ボタンなどの色 */
+.stButton > button {
+  background: var(--sa-orange) !important;
+  border-color: var(--sa-vermilion) !important;
+  color: #fff !important;
+}
+.stButton > button:hover { filter: brightness(0.95); }
+
+/* スライダー色（つまみとアクティブトラック） */
+[data-testid="stSlider"] [role="slider"] {
+  background: var(--sa-vermilion) !important;
+  border: 2px solid var(--sa-vermilion) !important;
+  box-shadow: 0 0 0 4px rgba(227,66,52,0.18) !important;
+}
+/* アクティブトラックの色調整（バージョン間の差を吸収するため汎用セレクタ） */
+[data-testid="stSlider"] div[aria-hidden="true"] > div {
+  background: var(--sa-orange) !important;
+}
+
+/* ピルの配色をシンボルカラーへ */
+.mobile-pill {
+  background: #FFF1E6;
+  color: var(--sa-vermilion);
+  font-weight: 700;
+}
+
+/* モバイルで上部が切れないよう微調整＆文字サイズを少し下げる */
+@media (max-width: 640px) {
+  .block-container { padding-top: calc(0.5rem + env(safe-area-inset-top)); }
+  .mobile-title { font-size: 0.95rem; line-height: 1.3; }
+}
+</style>
+""",
     unsafe_allow_html=True,
 )
 
@@ -280,4 +359,3 @@ with results_container:
             render_floor_maps_with_auto_overlay(results_df, active_aisles, floor)
 
 # ----- End -----
-
