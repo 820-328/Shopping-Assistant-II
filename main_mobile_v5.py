@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Shopping Assistant mobile-friendly UI (v5).
+Shopping Assistant mobile-friendly UI (v5.01).
 main.py と同等の機能を持ちながら、スマートフォンでも見やすいレイアウトに整形。
 """
 
