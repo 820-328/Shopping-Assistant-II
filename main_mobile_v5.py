@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Shopping Assistant mobile-friendly UI (v5.03).
+Shopping Assistant mobile-friendly UI (v5.04).
 main.py と同等の機能を持ちながら、スマートフォンでも見やすいレイアウトに整形。
 """
 
@@ -35,7 +35,7 @@ st.markdown(
       overscroll-behavior-y: none;
       background: #f4f5f7;
     }}
-    :root { color-scheme: light; }
+    :root {{ color-scheme: light; }}
     .block-container {{
       max-width: min(1200px, 95vw) !important;
       padding: 0.75rem 1.2rem 5rem;

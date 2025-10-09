@@ -1,0 +1,360 @@
+﻿# 環境	OS: Windows 11		
+	言語: Python 3.11.9		
+	実行場所:Vscode		
+# 現状 & 再現手順			
+# 期待する動作			
+# 制約 / 希望	赤ライン　2箇所を潰して		
+			
+＃code全文を再度生成して			
+1	"""		
+2	Shopping Assistant mobile-friendly UI (v5.03).		
+3	main.py と同等の機能を持ちながら、スマートフォンでも見やすいレイアウトに整形。		
+4	"""		
+5			
+6	from __future__ import annotations		
+7			
+8	from typing import Dict, List, Optional, cast		
+9			
+10	import pandas as pd		
+11	import streamlit as st		
+12			
+13	from constants import CHECKLIST_COLUMNS, SAMPLE_INPUT		
+14	from diagnostics import sidebar_diagnostics		
+15	from functions import (		
+16	    classify_items,		
+17	    compute_active_aisles,		
+18	    render_floor_maps_with_auto_overlay,		
+19	)		
+20			
+21	# ===== ページ設定 / CSS ====================================================		
+22	st.set_page_config(		
+23	    page_title="Shopping Assistant（モバイル）",		
+24	    page_icon="🛒",		
+25	    layout="wide",		
+26	    initial_sidebar_state="collapsed",		
+27	)		
+28			
+29	MAX_CONTENT_PX = 540		
+30	st.markdown(		
+31	    f"""		
+32	    <style>		
+33	    html, body {{		
+34	      overscroll-behavior-y: none;		
+35	      background: #f4f5f7;		
+36	    }}		
+37	    :root { color-scheme: light; }		
+38	    .block-container {{		
+39	      max-width: min(1200px, 95vw) !important;		
+40	      padding: 0.75rem 1.2rem 5rem;		
+41	    }}		
+42	    .mobile-card {{		
+43	      border-radius: 14px;		
+44	      padding: 0.65rem 0.75rem;		
+45	      background: white;		
+46	      box-shadow: 0 1px 4px rgba(15, 23, 42, 0.08);		
+47	      transition: transform 120ms ease, box-shadow 120ms ease, opacity 120ms ease;		
+48	    }}		
+49	    .mobile-card.done {{		
+50	      opacity: 0.48;		
+51	      background: #f8fafc;		
+52	    }}		
+53	    .mobile-title {{		
+54	      font-size: 1rem;		
+55	      font-weight: 600;		
+56	      line-height: 1.35;		
+57	      word-break: break-word;		
+58	    }}		
+59	    .mobile-meta {{		
+60	      display: flex;		
+61	      flex-wrap: wrap;		
+62	      gap: 0.5rem;		
+63	      margin-top: 0.4rem;		
+64	      font-size: 0.78rem;		
+65	      color: #64748b;		
+66	    }}		
+67	    .mobile-pill {{		
+68	      display: inline-flex;		
+69	      align-items: center;		
+70	      gap: 0.35rem;		
+71	      padding: 0.1rem 0.55rem;		
+72	      border-radius: 999px;		
+73	      background: #eef2ff;		
+74	      color: #4338ca;		
+75	      font-weight: 600;		
+76	    }}		
+77	    .action-row button {{		
+78	      width: 100%;		
+79	    }}		
+80	    @media (max-width: 640px) {{		
+81	      .block-container {{		
+82	        max-width: {MAX_CONTENT_PX}px !important;		
+83	        padding-left: 0.65rem;		
+84	        padding-right: 0.65rem;		
+85	      }}		
+86	      .mobile-title {{		
+87	        font-size: clamp(0.95rem, 1.8vw + 0.8rem, 1.05rem);		
+88	      }}		
+89	    }}		
+90	    </style>		
+91	    """,		
+92	    unsafe_allow_html=True,		
+93	)		
+94			
+95	st.title("Shopping Assistant（モバイル）")		
+96	st.caption("買い物リストを貼り付けて「検索」を押すと、フロアと通路を自動で提案します。")		
+97			
+98	# ===== セッションステート制御 =============================================		
+99	if st.session_state.get("__paste_sample__", False):		
+100	    st.session_state["items_text_area"] = SAMPLE_INPUT		
+101	    st.session_state["__paste_sample__"] = False		
+102	    st.session_state["__suppress_next_on_change"] = True		
+103	    st.session_state["__last_fill_mode"] = "sample"		
+104			
+105	if st.session_state.get("__clear_pending__", False):		
+106	    for key in list(st.session_state.keys()):		
+107	        if str(key).startswith("done_"):		
+108	            del st.session_state[key]		
+109	    st.session_state["__last_results__"] = None		
+110	    st.session_state["__last_details__"] = None		
+111	    st.session_state["items_text_area"] = ""		
+112	    st.session_state["__last_fill_mode"] = None		
+113	    st.session_state["__suppress_next_on_change"] = False		
+114	    st.session_state["__clear_pending__"] = False		
+115			
+116			
+117	def _on_text_change() -> None:		
+118	    if st.session_state.get("__suppress_next_on_change"):		
+119	        st.session_state["__suppress_next_on_change"] = False		
+120	        return		
+121	    st.session_state["__last_fill_mode"] = "manual"		
+122			
+123			
+124	# ===== 入力フォーム ========================================================		
+125	items_text = st.text_area(		
+126	    "買い物リスト（1行1アイテム）",		
+127	    key="items_text_area",		
+128	    height=260,		
+129	    placeholder="例)\n牛乳\n食パン\nトマト缶\n…",		
+130	    on_change=_on_text_change,		
+131	)		
+132			
+133	action_cols = st.columns(2)		
+134	with action_cols[0]:		
+135	    run_clicked = st.button("検索", type="primary", use_container_width=True)		
+136	with action_cols[1]:		
+137	    if st.button("リセット", use_container_width=True):		
+138	        st.session_state["__clear_pending__"] = True		
+139	        st.rerun()		
+140			
+141	st.divider()		
+142			
+143	# VS Code 未定義警告の回避用デフォルト（サイドバーで上書きされます）		
+144	mode: str = "AI (LLM + Embeddings)"		
+145	embed_model: str = "text-embedding-3-small"		
+146	chat_model: str = "gpt-4o-mini"		
+147	batch_llm: bool = True		
+148	topk: int = 10		
+149	embed_conf_threshold: float = 0.92		
+150	use_external: bool = True		
+151			
+152	# ===== 表示設定 & プレースホルダー =====================================		
+153	st.subheader("表示設定")		
+154	floor_filter = st.radio("フロア表示", ["全体", "1F", "2F"], horizontal=True, index=0)		
+155			
+156	results_container = st.container()		
+157			
+158	st.divider()		
+159			
+160	# ===== ボトムセクション（ガイド / AI設定） ================================		
+161	with st.expander("サンプル / 操作ガイド", expanded=False):		
+162	    st.markdown(		
+163	        "- クリップボードのリストを貼り付けると自動で検索します。\n"		
+164	        "- 各チェックを付けるとアクティブな通路が更新されます。"		
+165	    )		
+166	    if st.button("サンプルリストを貼り付け", use_container_width=True):		
+167	        st.session_state["__paste_sample__"] = True		
+168	        st.rerun()		
+169			
+170	with st.expander("AI 設定（必要な場合のみ）", expanded=False):		
+171	    mode = st.radio(		
+172	        "検索モード",		
+173	        ["AI (LLM + Embeddings)", "AI (Embeddings only)", "Local (RapidFuzz)"],		
+174	        index=0,		
+175	    )		
+176	    embed_model = st.selectbox(		
+177	        "Embeddings モデル",		
+178	        ["text-embedding-3-small", "text-embedding-3-large"],		
+179	        index=0,		
+180	    )		
+181	    chat_model = st.selectbox(		
+182	        "LLM モデル",		
+183	        ["gpt-4o-mini", "gpt-4.1-mini"],		
+184	        index=0,		
+185	    )		
+186	    batch_llm = st.checkbox("LLM をまとめて 1 度呼び出す", value=True)		
+187	    topk = st.slider("候補数（Embeddings ショートリスト）", 5, 20, 10)		
+188	    embed_conf_threshold = st.slider("Embeddings 類似度しきい値", 0.80, 0.98, 0.92, 0.01)		
+189	    use_external = st.checkbox("外部 API（OFF/OBF/OPF）を補助利用", value=True)		
+190			
+191	with st.sidebar:		
+192	    st.divider()		
+193	    with st.expander("AI �ݒ�i�K�v�ȏꍇ�̂݁j", expanded=False):		
+194	        mode = st.radio(		
+195	            "�������[�h",		
+196	            ["AI (LLM + Embeddings)", "AI (Embeddings only)", "Local (RapidFuzz)"],		
+197	            index=0,		
+198	        )		
+199	        embed_model = st.selectbox(		
+200	            "Embeddings ���f��",		
+201	            ["text-embedding-3-small", "text-embedding-3-large"],		
+202	            index=0,		
+203	        )		
+204	        chat_model = st.selectbox(		
+205	            "LLM ���f��",		
+206	            ["gpt-4o-mini", "gpt-4.1-mini"],		
+207	            index=0,		
+208	        )		
+209	        batch_llm = st.checkbox("LLM ���܂Ƃ߂� 1 �x�Ăяo��", value=True)		
+210	        topk = st.slider("��␔�iEmbeddings �V���[�g���X�g�j", 5, 20, 10)		
+211	        embed_conf_threshold = st.slider("Embeddings �ގ��x�������l", 0.80, 0.98, 0.92, 0.01)		
+212	        use_external = st.checkbox("�O�� API�iOFF/OBF/OPF�j��⏕���p", value=True)		
+213	    with st.expander("サンプル / 操作ガイド", expanded=False):		
+214	        st.markdown(		
+215	            "- クリップボードのリストを貼り付けると素早く試せます。\n"		
+216	            "- 各チェックに応じてアクティブ通路が更新されます。"		
+217	        )		
+218	        if st.button("サンプルリストを貼り付け", use_container_width=True, key="__paste_sample_btn__"):		
+219	            st.session_state["__paste_sample__"] = True		
+220	            st.rerun()		
+221	sidebar_diagnostics()		
+222			
+223	# ===== 検索実行 ============================================================		
+224	if run_clicked:		
+225	    raw_items = items_text or ""		
+226	    items: List[str] = [line for line in raw_items.splitlines() if line.strip()]		
+227	    if not items:		
+228	        st.warning("アイテム名を入力してください。")		
+229	    else:		
+230	        with st.spinner("検索しています…"):		
+231	            df_sorted, details = classify_items(		
+232	                items=items,		
+233	                mode=mode,		
+234	                embed_model=embed_model,		
+235	                chat_model=chat_model,		
+236	                batch_llm=batch_llm,		
+237	                topk=topk,		
+238	                embed_conf_threshold=float(embed_conf_threshold),		
+239	                use_external=use_external,		
+240	            )		
+241	        st.session_state["__last_results__"] = df_sorted.copy()		
+242	        st.session_state["__last_details__"] = details		
+243			
+244	# ===== チェックリスト & フロアマップ（プレースホルダーに出力） ============		
+245	results_df = cast(Optional[pd.DataFrame], st.session_state.get("__last_results__"))		
+246	name_col = CHECKLIST_COLUMNS[1]		
+247	floor_col = CHECKLIST_COLUMNS[2]		
+248	aisle_col = CHECKLIST_COLUMNS[3]		
+249			
+250	active_aisles: Dict[str, List[str]] = compute_active_aisles(results_df)		
+251	floor_title_map = {"1F": "1階", "2F": "2階"}		
+252	floors_to_show: List[str] = ["1F", "2F"] if floor_filter == "全体" else [floor_filter]		
+253			
+254	floor_records: Dict[str, List[dict]] = {key: [] for key in floor_title_map}		
+255	if results_df is not None and not results_df.empty:		
+256	    view_df = results_df[CHECKLIST_COLUMNS].copy()		
+257	    for record in view_df.to_dict("records"):		
+258	        floor_key = str(record.get(floor_col, "")).strip()		
+259	        floor_records.setdefault(floor_key, []).append(record)		
+260			
+261	with results_container:		
+262	    st.subheader("チェックリスト")		
+263	    for floor in floors_to_show:		
+264	        title = floor_title_map.get(floor, floor)		
+265	        st.markdown(f"--- {title} ---")		
+266	        list_col, map_col = st.columns([0.46, 0.54])		
+267			
+268	        rows = floor_records.get(floor, [])		
+269	        if not rows:		
+270	            with list_col:		
+271	                if results_df is None or results_df.empty:		
+272	                    st.info("まだ検索が実行されていません。")		
+273	                else:		
+274	                    st.info("該当アイテムはありません。")		
+275	        else:		
+276	            for row_dict in rows:		
+277	                no_raw = row_dict.get("No.", "")		
+278	                try:		
+279	                    no = int(no_raw)		
+280	                except Exception:		
+281	                    no = int(float(no_raw)) if isinstance(no_raw, (float, int)) else 0		
+282	                key = f"done_{no}"		
+283	                base_checked = bool(st.session_state.get(key, False))		
+284			
+285	                row_container = list_col.container()		
+286	                cb_col, info_col = row_container.columns([0.22, 0.78])		
+287	                cb_col.checkbox(" ", value=base_checked, key=key, label_visibility="collapsed")		
+288			
+289	                checked_now = bool(st.session_state.get(key, False))		
+290	                card_class = "mobile-card done" if checked_now else "mobile-card"		
+291	                info_col.markdown(		
+292	                    f"""		
+293	                    <div class="{card_class}">		
+294	                      <div class="mobile-title">{row_dict.get(name_col, '')}</div>		
+295	                      <div class="mobile-meta">		
+296	                        <span class="mobile-pill">No.{no}</span>		
+297	                        <span>{title}</span>		
+298	                        <span>{row_dict.get(aisle_col, '')}</span>		
+299	                      </div>		
+300	                    </div>		
+301	                    """,		
+302	                    unsafe_allow_html=True,		
+303	                )		
+304			
+305	        with map_col:		
+306	            render_floor_maps_with_auto_overlay(results_df, active_aisles, floor)		
+307			
+308	# ----- End -----		
+			
+# エラーログ			
+[{			
+	resource: "/c:/Users/tenne/OneDrive/Documents/■テンポラリー置場/OK_app【mobile】/main_mobile_v5.py",		
+	owner: "pylance",		
+	code: {		
+		value: "reportUndefinedVariable",	
+		target: {	
+			$mid: 1,
+			path: "/microsoft/pylance-release/blob/main/docs/diagnostics/reportUndefinedVariable.md",
+			scheme: "https",
+			authority: "github.com"
+		}	
+	},		
+	severity: 8,		
+	message: "\"color\" が定義されていません",		
+	source: "Pylance",		
+	startLineNumber: 38,		
+	startColumn: 13,		
+	endLineNumber: 38,		
+	endColumn: 18,		
+	origin: "extHost1"		
+}]			
+[{			
+	resource: "/c:/Users/tenne/OneDrive/Documents/■テンポラリー置場/OK_app【mobile】/main_mobile_v5.py",		
+	owner: "pylance",		
+	code: {		
+		value: "reportUndefinedVariable",	
+		target: {	
+			$mid: 1,
+			path: "/microsoft/pylance-release/blob/main/docs/diagnostics/reportUndefinedVariable.md",
+			scheme: "https",
+			authority: "github.com"
+		}	
+	},		
+	severity: 8,		
+	message: "\"scheme\" が定義されていません",		
+	source: "Pylance",		
+	startLineNumber: 38,		
+	startColumn: 19,		
+	endLineNumber: 38,		
+	endColumn: 25,		
+	origin: "extHost1"		
+}]			
