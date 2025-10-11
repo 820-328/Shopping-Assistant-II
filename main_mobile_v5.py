@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, cast
 
+import html
 import pandas as pd
 import streamlit as st
 
@@ -64,6 +65,12 @@ st.markdown(
       margin-top: 0.4rem;
       font-size: 0.78rem;
       color: #64748b;
+    }}
+    .mobile-meta.detail-line {{
+      display: block;
+      gap: 0.25rem;
+      font-size: 0.74rem;
+      color: #475569;
     }}
     .mobile-pill {{
       display: inline-flex;
@@ -300,6 +307,19 @@ if run_clicked:
 
 # ===== チェックリスト & フロアマップ（プレースホルダーに出力） ============
 results_df = cast(Optional[pd.DataFrame], st.session_state.get("__last_results__"))
+raw_details = st.session_state.get("__last_details__")
+detail_map: Dict[str, Dict[str, object]] = {}
+if isinstance(raw_details, list):
+    for entry in raw_details:
+        if isinstance(entry, dict) and entry.get("item") is not None:
+            key = str(entry.get("item"))
+            detail_map[key] = entry  # type: ignore[assignment]
+        elif isinstance(entry, tuple) and len(entry) == 2:
+            key = str(entry[0])
+            detail_map[key] = {"item": entry[0], "local": entry[1], "ai": []}
+        elif isinstance(entry, tuple) and len(entry) == 3:
+            key = str(entry[0])
+            detail_map[key] = {"item": entry[0], "local": entry[1], "ai": entry[2]}
 name_col = CHECKLIST_COLUMNS[1]
 floor_col = CHECKLIST_COLUMNS[2]
 aisle_col = CHECKLIST_COLUMNS[3]
@@ -345,6 +365,36 @@ with results_container:
 
                 checked_now = bool(st.session_state.get(key, False))
                 card_class = "mobile-card done" if checked_now else "mobile-card"
+
+                item_name = str(row_dict.get(name_col, "") or "")
+                detail_entry = detail_map.get(item_name)
+
+                def _format_candidates(candidates: List[Dict[str, object]]) -> str:
+                    formatted: List[str] = []
+                    for cand in candidates[:3]:
+                        category = html.escape(str(cand.get("category", "")))
+                        floor_txt = str(cand.get("floor", "") or "")
+                        aisle_txt = str(cand.get("aisle", "") or "")
+                        location = ""
+                        if floor_txt or aisle_txt:
+                            location = f"({html.escape(floor_txt)}{html.escape(aisle_txt)})"
+                        formatted.append(f"{category}{location}")
+                    return " / ".join(formatted)
+
+                extra_lines: List[str] = []
+                if detail_entry:
+                    local_list = detail_entry.get("local") or []
+                    ai_list = detail_entry.get("ai") or []
+                    if isinstance(local_list, list) and local_list:
+                        extra_lines.append(f"① 一致候補: {_format_candidates(local_list)}")
+                    if isinstance(ai_list, list) and ai_list:
+                        extra_lines.append(f"② AI候補: {_format_candidates(ai_list)}")
+
+                extra_html = "".join(
+                    f"<div class=\"mobile-meta detail-line\">{html.escape(line)}</div>"
+                    for line in extra_lines
+                )
+
                 info_col.markdown(
                     f"""
                     <div class="{card_class}">
@@ -354,6 +404,7 @@ with results_container:
                         <span>{title}</span>
                         <span>{row_dict.get(aisle_col, '')}</span>
                       </div>
+                      {extra_html}
                     </div>
                     """,
                     unsafe_allow_html=True,

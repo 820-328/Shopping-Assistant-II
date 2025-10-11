@@ -2,7 +2,7 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -17,6 +17,7 @@ from constants import (
     SYNONYMS,
     ALPHA_OVERLAY_1F,
     ALPHA_OVERLAY_2F,
+    CATEGORY_ALIASES,
 )
 
 # ========== 文字正規化・別名展開・通路ソート ==========
@@ -34,9 +35,59 @@ def _SPILT_SAFE(cat: str) -> List[str]:
     except Exception:
         return [cat]
 
+CATEGORY_ALIAS_LOOKUP = {
+    normalize_text(alias): category
+    for category, aliases in CATEGORY_ALIASES.items()
+    for alias in aliases
+}
+
+CATEGORY_BOOST_KEYWORDS: Dict[str, List[str]] = {
+    "DIY用品・工具": ["テープ", "養生", "梱包", "粘着", "接着", "貼付", "補修", "ボンド"],
+    "文房具・事務用品": ["ペン", "シャープ", "ノート", "事務", "文房具", "ステーショナリー", "メモ", "ホチキス"],
+    "ペット用品": ["ペット", "犬", "猫", "インコ", "小鳥", "ペット用", "ペットグッズ"],
+    "キャットフード": ["猫", "キャット", "インコ", "鳥", "餌", "ペットフード", "ごはん"],
+    "猫砂": ["猫砂", "ネコ砂", "トイレ砂", "猫トイレ"],
+    "果実飲料": ["ジュース", "果汁", "リンゴ", "アップル", "オレンジ", "グレープ", "マンゴー", "スムージー"],
+    "茶飲料": ["茶", "ティー", "緑茶", "麦茶", "ほうじ茶", "ウーロン", "ジャスミン"],
+    "炭酸飲料": ["炭酸", "サイダー", "コーラ", "ソーダ", "ラムネ", "スパークリング"],
+    "紙製品": ["ティッシュ", "ペーパー", "ナプキン", "トイレット"],
+}
+
+CATEGORY_NEGATIVE_KEYWORDS: Dict[str, List[str]] = {
+    "ガム・キャラクター菓子": ["テープ", "養生", "梱包", "粘着", "接着", "貼付", "工具"],
+    "チョコレート": ["テープ", "養生", "梱包", "粘着"],
+    "クッキー・ビスケット": ["テープ", "養生", "梱包"],
+    "キャンディー": ["テープ", "養生", "梱包"],
+    "鮮魚": ["餌", "エサ", "ペット", "鳥", "インコ", "キャット", "ドッグ"],
+}
+
+LOCAL_MATCH_PRIORITY = {
+    "synonym": 0,
+    "exact": 1,
+    "substring": 2,
+    "fuzzy": 3,
+}
+
+def _resolve_synonym(word: str) -> str:
+    if not word:
+        return word
+    base = SYNONYMS.get(word)
+    if base:
+        return base
+    norm = normalize_text(word)
+    if norm in CATEGORY_ALIAS_LOOKUP:
+        return CATEGORY_ALIAS_LOOKUP[norm]
+    for alias_norm, category in CATEGORY_ALIAS_LOOKUP.items():
+        if alias_norm and alias_norm in norm:
+            return category
+    return word
+
 def expand_aliases(cat: str) -> List[str]:
     base = normalize_text(cat)
     parts = [normalize_text(p) for p in _SPILT_SAFE(cat)]
+    extras = CATEGORY_ALIASES.get(cat, [])
+    if extras:
+        parts.extend(normalize_text(p) for p in extras)
     return list(dict.fromkeys([base] + parts))
 
 def aisle_sort_key(s: str) -> Tuple[int, int, str]:
@@ -91,30 +142,30 @@ def shortlist_many_with_embeddings(
     # Local fallback using RapidFuzz/difflib when OpenAI client or embeddings are unavailable
     def _local_shortlist(q: str):
         aliases = [r.alias for r in rows]
-        qn = normalize_text(SYNONYMS.get(q, q))
+        qn = normalize_text(_resolve_synonym(q))
         try:
             if HAVE_RAPIDFUZZ:
                 bests = rf_process.extract(qn, aliases, scorer=rf_fuzz.WRatio, limit=k)
-                idxs = [int(b[2]) for b in bests] if bests else []
-                shortlist = [rows[i] for i in idxs]
-                top_sim = float(bests[0][1]) / 100.0 if bests else 0.0
-                return (shortlist if shortlist else rows[:k], top_sim)
+                pairs = [(rows[int(b[2])], float(b[1]) / 100.0) for b in bests]
+                top_sim = pairs[0][1] if pairs else 0.0
+                return (pairs if pairs else [(rows[0], 0.0)], top_sim)
             else:
                 import difflib
                 matches = difflib.get_close_matches(qn, aliases, n=k, cutoff=0.0)  # type: ignore
-                shortlist = []
+                pairs = []
                 for a in matches:
                     try:
-                        shortlist.append(rows[aliases.index(a)])
+                        idx = aliases.index(a)
                     except Exception:
-                        pass
-                return (shortlist if shortlist else rows[:k], 0.0)
+                        continue
+                    pairs.append((rows[idx], 0.7))
+                return (pairs if pairs else [(rows[0], 0.0)], 0.0)
         except Exception:
-            return (rows[:k], 0.0)
+            return ([(rows[0], 0.0)], 0.0)
 
     if client is None:
         return {q: _local_shortlist(q) for q in queries}
-    q_norm = [normalize_text(SYNONYMS.get(q, q)) for q in queries]
+    q_norm = [normalize_text(_resolve_synonym(q)) for q in queries]
     qvecs = embed_texts(q_norm, model)
     base_vecs = _cache_alias_embeddings(enriched, model, f"key-{model}")
     if qvecs is None or base_vecs is None:
@@ -125,11 +176,119 @@ def shortlist_many_with_embeddings(
         q_unit = qv / (np.linalg.norm(qv) + 1e-9)
         sims = alias_unit @ q_unit
         top_idx = np.argsort(-sims)[:k]
-        shortlist = [rows[int(i)] for i in top_idx]
+        shortlist = []
+        for idx in top_idx:
+            shortlist.append((rows[int(idx)], float(sims[int(idx)])))
         top_sim = float(sims[int(top_idx[0])]) if len(top_idx) > 0 else 0.0
+        if not shortlist:
+            fallback_pairs, top_sim = _local_shortlist(queries[qi])
+            shortlist = fallback_pairs
         out[queries[qi]] = (shortlist, top_sim)
     return out
 
+# ========== Local candidate helpers ==========
+
+def _local_candidates_for_item(
+    item: str,
+    rows: List[CategoryRow],
+    aliases: List[str],
+    limit: int = 6,
+) -> List[Dict[str, Any]]:
+    q_raw = (item or "").strip()
+    q_norm = normalize_text(q_raw)
+    results: List[Dict[str, Any]] = []
+    seen = set()
+
+    def add(row: CategoryRow, alias: str, score: float, match_type: str) -> None:
+        key = (row.floor, row.aisle, row.category, alias)
+        if key in seen:
+            return
+        seen.add(key)
+        alias_norm = normalize_text(alias) if alias else normalize_text(row.alias)
+        score_adj = float(score)
+
+        for boost in CATEGORY_BOOST_KEYWORDS.get(row.category, []):
+            nb = normalize_text(boost)
+            if nb and nb in q_norm:
+                score_adj += 15.0
+
+        for negate in CATEGORY_NEGATIVE_KEYWORDS.get(row.category, []):
+            nn = normalize_text(negate)
+            if nn and (nn in q_norm or (alias_norm and nn in alias_norm)):
+                score_adj -= 40.0
+
+        score_adj = max(0.0, min(score_adj, 100.0))
+
+        results.append({
+            "row": row,
+            "alias": alias,
+            "score": score_adj,
+            "match_type": match_type,
+        })
+
+    synonym_cat = _resolve_synonym(q_raw)
+    if synonym_cat and synonym_cat != q_raw:
+        for row in rows:
+            if row.category == synonym_cat:
+                add(row, row.alias, 100.0, "synonym")
+                break
+
+    if HAVE_RAPIDFUZZ and aliases:
+        matches = rf_process.extract(q_norm, aliases, scorer=rf_fuzz.WRatio, limit=limit)
+        for alias, score, idx in matches:
+            row = rows[int(idx)]
+            alias_norm = alias
+            if alias_norm == q_norm:
+                mtype = "exact"
+            elif alias_norm and (alias_norm in q_norm or q_norm in alias_norm):
+                mtype = "substring"
+            else:
+                mtype = "fuzzy"
+            add(row, alias_norm, float(score), mtype)
+    else:
+        try:
+            import difflib
+
+            matches = difflib.get_close_matches(q_norm, aliases, n=limit, cutoff=0.0)  # type: ignore[arg-type]
+            for alias in matches:
+                idx = aliases.index(alias)
+                row = rows[idx]
+                add(row, alias, 80.0, "fuzzy")
+        except Exception:
+            pass
+
+    results.sort(key=lambda c: (LOCAL_MATCH_PRIORITY.get(c["match_type"], 4), -c["score"]))
+    return results
+
+
+def _serialize_candidates(candidates: List[Dict[str, Any]], limit: int = 5) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for entry in candidates[:limit]:
+        row: CategoryRow = entry["row"]
+        out.append({
+            "category": row.category,
+            "floor": row.floor,
+            "aisle": row.aisle,
+            "alias": entry.get("alias", row.alias),
+            "score": round(float(entry.get("score", 0.0)), 1),
+            "match_type": entry.get("match_type", "fuzzy"),
+        })
+    return out
+
+
+def _find_row_by_category(rows: List[CategoryRow], category: str, floor: Optional[str] = None, aisle: Optional[str] = None) -> Optional[CategoryRow]:
+    for row in rows:
+        if row.category != category:
+            continue
+        if floor and row.floor != floor:
+            continue
+        if aisle and row.aisle != aisle:
+            continue
+        return row
+    return None
+
+
+# ========== LLM ==========
 # ========== LLM ==========
 def _try_parse_json(content: str):
     try:
@@ -151,8 +310,11 @@ def llm_pick_best(item: str, shortlist: List[CategoryRow], model_name: str, hint
         "You are a store category classifier.\n"
         "Prefer external category hints (Open Food/Beauty/Products Facts tags) when they clearly indicate the domain.\n"
         "Given a Japanese item and a shortlist (with floor/aisle), choose EXACTLY ONE best match.\n"
-        "Interpret compound nouns correctly (e.g., 'ガムテープ' is packing tape, not candy). "
-        "If an item contains household suffixes like テープ, ペン, 洗剤, 袋, ふきん, map to non-food.\n"
+        "Guidelines:\n"
+        "- 'テープ','養生','梱包','粘着','接着' imply DIY/工具 categories. Never map them to confectionery.\n"
+        "- 'インコ','鳥','ペット','猫','犬' imply pet supplies. Never map them to鮮魚 or fresh food.\n"
+        "- Beverage terms like ジュース/果汁/茶/炭酸/乳酸菌 should stay in飲料 categories.\n"
+        "Interpret compound nouns correctly (e.g., 'ガムテープ' is packing tape, not candy).\n"
         "Return JSON: floor, aisle, category, confidence(0-100), explanation."
     )
     payload = {
@@ -181,8 +343,12 @@ def llm_pick_best_batch(items: List[str], shortlist_map: Dict[str, List[Category
     sys_prompt = (
         "You are a store category classifier.\n"
         "Prefer external category hints (Open Food/Beauty/Products Facts tags) when they clearly indicate the domain.\n"
-        "For each item, pick EXACTLY ONE category from its shortlist (with floor/aisle). "
-        "Handle compound nouns (e.g., 'ガムテープ' → packing tape). "
+        "For each item, pick EXACTLY ONE category from its shortlist (with floor/aisle).\n"
+        "Guidelines:\n"
+        "- 'テープ','養生','梱包','粘着','接着' imply DIY/工具 categories. Never map them to confectionery.\n"
+        "- 'インコ','鳥','ペット','猫','犬' imply pet supplies. Avoid鮮魚 or fresh food.\n"
+        "- ジュース/果汁/茶/炭酸/乳酸菌など飲料語は飲料カテゴリを優先。\n"
+        "Interpret compound nouns correctly (e.g., 'ガムテープ' is packing tape).\n"
         "Return JSON array of {item, floor, aisle, category, confidence, explanation}."
     )
     batch_payload = []
@@ -247,110 +413,212 @@ def classify_items(
     topk: int,
     embed_conf_threshold: float,
     use_external: bool,
-) -> Tuple[pd.DataFrame, List[Tuple[str, List[Dict[str, str]]]]]:
+) -> Tuple[pd.DataFrame, List[Dict[str, Any]]]:
     rows = build_index()
     aliases = [r.alias for r in rows]
     enriched = tuple(f"{r.alias} | {r.category} | {r.floor}{r.aisle}" for r in rows)
 
-    results: List[Dict[str, object]] = []
-    details: List[Tuple[str, List[Dict[str, str]]]] = []
+    local_map = {
+        it: _local_candidates_for_item(it, rows, aliases, limit=max(6, topk))
+        for it in items
+    }
+    direct_map: Dict[str, List[Dict[str, Any]]] = {}
+    for it, cand in local_map.items():
+        direct = [c for c in cand if c["match_type"] in ("synonym", "exact", "substring")]
+        if direct:
+            direct_map[it] = direct
+
+    results: List[Dict[str, Any]] = []
+    detail_records: List[Dict[str, Any]] = []
 
     client = get_openai_client()
-    # If AI mode is selected but OpenAI client is unavailable, downgrade to Local
     if mode.startswith("AI") and client is None:
         mode = "Local (RapidFuzz)"
 
-    if mode == "AI (LLM + Embeddings)" and client is not None:
-        sl_map = shortlist_many_with_embeddings(items, topk, embed_model, rows, enriched)
+    needs_ai = [it for it in items if it not in direct_map and mode.startswith("AI")]
+    ai_decisions: Dict[str, Dict[str, Any]] = {}
 
-        decided: Dict[str, Optional[dict]] = {}
-        for it, (sl, top_sim) in sl_map.items():
-            if top_sim >= embed_conf_threshold:
-                t = sl[0]
+    if mode == "AI (LLM + Embeddings)" and client is not None and needs_ai:
+        sl_map = shortlist_many_with_embeddings(needs_ai, max(topk, 3), embed_model, rows, enriched)
+        decided: Dict[str, Optional[Dict[str, Any]]] = {}
+        for it, (pairs, top_sim) in sl_map.items():
+            if pairs and top_sim >= embed_conf_threshold:
+                row, score = pairs[0]
                 decided[it] = {
-                    "floor": t.floor, "aisle": t.aisle, "category": t.category,
-                    "confidence": int(round(top_sim * 100)), "explanation": "embedding confident"
+                    "pick_row": row,
+                    "confidence": int(round(max(0.0, min(score, 1.0)) * 100)),
+                    "explanation": "embedding confident",
+                    "candidates": pairs,
                 }
             else:
                 decided[it] = None
 
-        remaining = [it for it in items if decided[it] is None]
+        remaining = [it for it in needs_ai if decided[it] is None]
         hints_map: Dict[str, dict] = {}
         if use_external and remaining:
-            for it in remaining:
-                hints_map[it] = external_hints(it)
+            hints_map = {it: external_hints(it) for it in remaining}
 
         if remaining and batch_llm:
-            sub_map = {it: sl_map[it][0] for it in remaining}
+            sub_map = {it: [row for row, _ in sl_map[it][0]] for it in remaining}
             decided_list = llm_pick_best_batch(remaining, sub_map, chat_model, hints_map=hints_map) or []
             mapped = {d.get("item"): d for d in decided_list if isinstance(d, dict) and d.get("item")}
             for it in remaining:
                 pick = mapped.get(it)
-                if not pick:
-                    t = sl_map[it][0][0]
-                    pick = {"floor": t.floor, "aisle": t.aisle, "category": t.category,
-                            "confidence": 70, "explanation": "fallback: embedding top"}
-                decided[it] = pick
+                if pick:
+                    row = _find_row_by_category(rows, pick.get("category", ""), pick.get("floor"), pick.get("aisle"))
+                    if row is None and sl_map[it][0]:
+                        row = sl_map[it][0][0][0]
+                    confidence = int(round(float(pick.get("confidence", 80))))
+                    decided[it] = {
+                        "pick_row": row,
+                        "confidence": confidence,
+                        "explanation": pick.get("explanation", "llm selection"),
+                        "candidates": sl_map[it][0],
+                    }
+                else:
+                    pairs = sl_map[it][0]
+                    if pairs:
+                        row, score = pairs[0]
+                        decided[it] = {
+                            "pick_row": row,
+                            "confidence": int(round(max(0.0, min(score, 1.0)) * 100)),
+                            "explanation": "fallback: embedding top",
+                            "candidates": pairs,
+                        }
         elif remaining:
             for it in remaining:
-                sl = sl_map[it][0]
-                pick = llm_pick_best(it, sl, chat_model, hints=hints_map.get(it))
-                if not pick:
-                    t = sl[0]
-                    pick = {"floor": t.floor, "aisle": t.aisle, "category": t.category,
-                            "confidence": 70, "explanation": "fallback: embedding top"}
-                decided[it] = pick
+                pairs = sl_map[it][0]
+                pick = llm_pick_best(it, [row for row, _ in pairs], chat_model, hints=hints_map.get(it))
+                if pick:
+                    row = _find_row_by_category(rows, pick.get("category", ""), pick.get("floor"), pick.get("aisle"))
+                    if row is None and pairs:
+                        row = pairs[0][0]
+                    confidence = int(round(float(pick.get("confidence", 80))))
+                    decided[it] = {
+                        "pick_row": row,
+                        "confidence": confidence,
+                        "explanation": pick.get("explanation", "llm selection"),
+                        "candidates": pairs,
+                    }
+                elif pairs:
+                    row, score = pairs[0]
+                    decided[it] = {
+                        "pick_row": row,
+                        "confidence": int(round(max(0.0, min(score, 1.0)) * 100)),
+                        "explanation": "fallback: embedding top",
+                        "candidates": pairs,
+                    }
+        for it, info in decided.items():
+            if info is None and sl_map.get(it):
+                row, score = sl_map[it][0][0]
+                info = {
+                    "pick_row": row,
+                    "confidence": int(round(max(0.0, min(score, 1.0)) * 100)),
+                    "explanation": "fallback: embedding top",
+                    "candidates": sl_map[it][0],
+                }
+            if info:
+                ai_decisions[it] = info
 
-        for it in items:
-            pick = decided[it] or {}
+    elif mode == "AI (Embeddings only)" and client is not None and needs_ai:
+        sl_map = shortlist_many_with_embeddings(needs_ai, max(topk, 3), embed_model, rows, enriched)
+        for it, (pairs, _) in sl_map.items():
+            if not pairs:
+                continue
+            row, score = pairs[0]
+            ai_decisions[it] = {
+                "pick_row": row,
+                "confidence": int(round(max(0.0, min(score, 1.0)) * 100)),
+                "explanation": "embedding only",
+                "candidates": pairs,
+            }
+
+    for it in items:
+        local_candidates = local_map.get(it, [])
+        direct_candidates = [c for c in direct_map.get(it, []) if c["match_type"] in ("synonym", "exact", "substring")]
+
+        detail_record: Dict[str, Any] = {
+            "item": it,
+            "local": _serialize_candidates(direct_candidates if direct_candidates else local_candidates[:3]),
+            "ai": [],
+        }
+
+        chosen_row: Optional[CategoryRow] = None
+        confidence = 0
+        explanation = ""
+
+        if direct_candidates:
+            primary = direct_candidates[0]
+            chosen_row = primary["row"]
+            confidence = int(round(min(primary.get("score", 100.0), 100.0)))
+            explanation = {
+                "synonym": "local synonym match",
+                "exact": "local exact match",
+                "substring": "local partial match",
+            }.get(primary["match_type"], "local match")
+        elif it in ai_decisions:
+            info = ai_decisions[it]
+            chosen_row = info.get("pick_row")
+            confidence = int(info.get("confidence", 70))
+            explanation = info.get("explanation", "ai selection")
+            ai_candidates = info.get("candidates", [])
+            ai_entries = [
+                {"row": row, "alias": row.alias, "score": float(score) * 100.0, "match_type": "ai"}
+                for row, score in ai_candidates
+            ]
+            detail_record["ai"] = _serialize_candidates(ai_entries, limit=5)
+        elif local_candidates:
+            fallback = local_candidates[0]
+            chosen_row = fallback["row"]
+            confidence = int(round(min(fallback.get("score", 70.0), 100.0)))
+            explanation = "local fuzzy match"
+        else:
             results.append({
-                "品名": it, "階": pick.get("floor", ""), "通路": pick.get("aisle", ""),
-                "カテゴリ(推定)": pick.get("category", ""), "score": int(round(float(pick.get("confidence", 0)))),
-                "explanation": pick.get("explanation", ""),
+                "品名": it,
+                "階": "",
+                "通路": "",
+                "カテゴリ(推定)": "(未判定)",
+                "score": 0,
+                "explanation": "not found",
             })
-            details.append((it, [{"候補カテゴリ": r.category, "floor/aisle": f"{r.floor}{r.aisle}"} for r in (sl_map[it][0])]))
+            detail_records.append(detail_record)
+            continue
 
-    elif mode == "AI (Embeddings only)" and client is not None:
-        sl_map = shortlist_many_with_embeddings(items, k=1, model=embed_model, rows=rows, enriched=enriched)
-        for it in items:
-            t = sl_map[it][0][0]
+        if chosen_row is None:
             results.append({
-                "品名": it, "階": t.floor, "通路": t.aisle, "カテゴリ(推定)": t.category,
-                "score": int(round(sl_map[it][1] * 100)), "explanation": "embedding only"
+                "品名": it,
+                "階": "",
+                "通路": "",
+                "カテゴリ(推定)": "(未判定)",
+                "score": 0,
+                "explanation": "not found",
             })
-            details.append((it, [{"候補カテゴリ": t.category, "floor/aisle": f"{t.floor}{t.aisle}"}]))
+        else:
+            results.append({
+                "品名": it,
+                "階": chosen_row.floor,
+                "通路": chosen_row.aisle,
+                "カテゴリ(推定)": chosen_row.category,
+                "score": int(max(0, min(confidence, 100))),
+                "explanation": explanation,
+            })
 
-    else:
-        for it in items:
-            q = normalize_text(SYNONYMS.get(it, it))
-            if HAVE_RAPIDFUZZ:
-                best = rf_process.extractOne(q, [r.alias for r in rows], scorer=rf_fuzz.WRatio)
-                if best:
-                    idx, sc = int(best[2]), float(best[1])
-                    r = rows[idx]
-                    results.append({"品名": it, "階": r.floor, "通路": r.aisle,
-                                    "カテゴリ(推定)": r.category, "score": int(round(sc)), "explanation": "local"})
-                    continue
-            else:
-                import difflib
-                close = difflib.get_close_matches(q, [r.alias for r in rows], n=1, cutoff=0.5)  # type: ignore
-                if close:
-                    a = close[0]; i = [r.alias for r in rows].index(a); r = rows[i]
-                    results.append({"品名": it, "階": r.floor, "通路": r.aisle,
-                                    "カテゴリ(推定)": r.category, "score": 80, "explanation": "local"})
-                    continue
-            results.append({"品名": it, "階": "", "通路": "", "カテゴリ(推定)": "(未判定)", "score": 0, "explanation": "not found"})
+        detail_records.append(detail_record)
 
-    # sort & numbering
     df = pd.DataFrame(results)
     if not df.empty:
         def _as_key(x):
-            m = re.match(r"^(\d+)([A-Za-zＡ-Ｚa-zａ-ｚ]*)?$", str(x)) if x else None
+            if not x:
+                return (10**9, 10**9, "")
+            s = str(x)
+            m = re.match(r"^(\d+)([A-Za-z�`-�ya-z��-��]*)?$", s)
             if not m:
-                return (10**9, 10**9, str(x))
-            n = int(m.group(1)); suf = (m.group(2) or "").upper()
+                return (10**9, 10**9, s)
+            n = int(m.group(1))
+            suf = (m.group(2) or "").upper()
             order = {"A": 0, "B": 1, "C": 2, "": 3}.get(suf if suf.isalpha() else "", 99)
-            return (n, order, str(x))
+            return (n, order, s)
+
         df["_floor_ord"] = df["階"].map(lambda f: 0 if f == "1F" else (1 if f == "2F" else 2))
         df["_a_n"] = df["通路"].map(lambda x: _as_key(x)[0] if x else 10**9)
         df["_a_s"] = df["通路"].map(lambda x: _as_key(x)[1] if x else 10**9)
@@ -359,8 +627,7 @@ def classify_items(
     else:
         df_sorted = df
 
-    return df_sorted, details
-
+    return df_sorted, detail_records
 # ========== 画像（パス探索/合成/ハイライト） ==========
 APP_DIR = Path(__file__).resolve().parent
 CANDIDATE_ASSET_DIRS = [APP_DIR / "素材", APP_DIR / "assets", APP_DIR / "static"]
